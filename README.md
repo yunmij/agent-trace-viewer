@@ -1,110 +1,153 @@
-# agent-trace-viewer
+<div align="center">
 
-Browse and visualize the session traces your AI coding agents leave on disk — **Claude Code**, **Codex**, **OpenClaw** and **Hermes** — in a local web UI.
+# Agent Trace Viewer
 
-Zero runtime dependencies (Node built-ins only), read-only, never phones home.
+**See exactly what your AI coding agent did.**
+A local web UI for browsing the session traces that Claude Code, Codex, OpenClaw and Hermes leave on your disk.
 
-[中文说明](#中文说明)
+[![npm](https://img.shields.io/npm/v/agent-trace-viewer?color=4f46e5)](https://www.npmjs.com/package/agent-trace-viewer)
+[![node](https://img.shields.io/node/v/agent-trace-viewer?color=4f46e5)](https://nodejs.org)
+[![license](https://img.shields.io/github/license/yunmij/agent-trace-viewer?color=4f46e5)](LICENSE)
+![dependencies](https://img.shields.io/badge/runtime%20deps-0-4f46e5)
+
+English · [简体中文](README.zh-CN.md)
+
+<img src="https://raw.githubusercontent.com/yunmij/agent-trace-viewer/main/docs/screenshot-light.png" alt="Agent Trace Viewer — session list and trace view" width="900">
+
+</div>
+
+## Why
+
+Coding agents write a detailed log of every session — prompts, thinking, tool calls, tool output, hook injections, token usage — but as raw JSONL that's painful to read. **Agent Trace Viewer** turns those files into a searchable, collapsible timeline so you can:
+
+- debug why an agent went off the rails, step by step;
+- review what a long autonomous run actually changed;
+- compare how different agents tackle the same task;
+- find that one command or answer from last week.
+
+Everything runs locally. No account, no upload, no telemetry.
 
 ## Quick start
 
 ```bash
 npx agent-trace-viewer
-# or install globally
-npm i -g agent-trace-viewer
-agent-trace-viewer          # short alias: atv
 ```
 
-Then open <http://localhost:8787>.
+Open **<http://localhost:8787>**. That's it — sessions from every supported agent on your machine show up automatically.
+
+Prefer a global install?
+
+```bash
+npm install -g agent-trace-viewer
+agent-trace-viewer        # or the short alias: atv
+```
+
+Requires **Node.js 18+** (Hermes sessions need Node 22.5+ for the built-in SQLite module).
 
 ## Features
 
-- **One list for every agent** — sessions from all sources, newest first, titled by the first real user prompt, with project folder, size and age.
-- **Filter & search** — agent pills with counts, per-source filter, multi-term search over title / session id / project / path, optional auto-refresh.
-- **Readable traces** — user / assistant / tool / system cards, collapsible; thinking, tool calls and tool results paired by id, token usage, hook and context injections. Noise (trivial system ticks) hidden by default.
-- **Find in session** — highlight every match, jump with Enter / Shift+Enter.
-- **Keyboard first** — `/` to search, `j` / `k` (or ↑ / ↓) to move between sessions.
-- **Light & dark themes**, follows your system by default.
-- **Any `.jsonl`** — point it at extra folders or single files; the format (Claude / Codex / OpenClaw) is detected from content.
-
-## Options
-
-```
--p, --port <n>       Port to listen on (default 8787, env PORT)
-    --host <addr>    Address to bind (default 127.0.0.1, env HOST)
-    --root <path>    Extra input: a directory or a single .jsonl file. Repeatable.
--v, --version        Print version
--h, --help           Show help
-```
-
-Extra sources can also be added or removed at runtime from the **Input sources** (folder icon) panel.
-
-### Default sources
-
-| Agent | Location |
+| | |
 |---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` |
-| Codex | `~/.codex/sessions/**/rollout-*.jsonl` |
-| OpenClaw | `~/.openclaw/agents/**/*.jsonl` |
-| Hermes | `~/.hermes/state.db` (SQLite, needs Node ≥ 22.5) |
+| 🗂 **One list for every agent** | Claude Code, Codex, OpenClaw and Hermes sessions side by side, newest first. Each row shows the first real prompt as its title, the project folder, age and size. |
+| 🔎 **Filter & search** | Agent pills with live counts, per-source filter, and multi-word search across title, session id, project and path. Optional auto-refresh while an agent is running. |
+| 🧵 **Readable traces** | User / assistant / tool / system cards you can collapse one by one. Thinking, tool calls and their results (paired by id), errors, token usage and hook / context injections are all labelled. Low-signal system noise is hidden by default. |
+| 🎯 **Find in session** | Highlights every match in a long trace and jumps between them with Enter / Shift+Enter — collapsed cards open automatically. |
+| ⌨️ **Keyboard friendly** | `/` focuses search, `j` / `k` (or ↑ / ↓) move between sessions. |
+| 🌗 **Light & dark** | Follows your system theme; toggle any time. |
+| 📁 **Any JSONL** | Point it at extra folders or single files. The format (Claude / Codex / OpenClaw) is detected from the content, not the path. |
+| 🪶 **Tiny** | Zero runtime dependencies, ~40 KB package, read-only. |
 
-## Security
+<img src="https://raw.githubusercontent.com/yunmij/agent-trace-viewer/main/docs/screenshot-dark.png" alt="Dark theme with in-session search and a failed tool call" width="900">
 
-Agent transcripts often contain source code, file paths and sometimes secrets. By default the server:
+## Supported agents
 
-- listens on **127.0.0.1 only**, and rejects requests whose `Host` header is not a loopback name (blocks DNS-rebinding);
-- only reads `.jsonl` files under the configured sources;
-- accepts source changes only as `POST` + `application/json`, so other websites can't trigger them.
+| Agent | Default location | Notes |
+|---|---|---|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/**/*.jsonl` | thinking, tool use/results, hook & attachment injections, usage |
+| [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/**/rollout-*.jsonl` | reasoning summaries (encrypted reasoning is not visible), function calls, token totals |
+| [OpenClaw](https://github.com/openclaw/openclaw) | `~/.openclaw/agents/**/*.jsonl` | plain session logs and trajectory snapshots |
+| Hermes | `~/.hermes/state.db` | read from SQLite; includes compacted history and session totals |
 
-`--host 0.0.0.0` exposes **every local session** to your network — only use it on networks you trust.
+Missing a format you use? [Open an issue](https://github.com/yunmij/agent-trace-viewer/issues) with a (redacted) sample.
+
+## Usage
+
+```
+agent-trace-viewer [--port <n>] [--host <addr>] [--root <dir|file.jsonl> ...]
+
+  -p, --port <n>       Port to listen on (default 8787, env PORT)
+      --host <addr>    Address to bind (default 127.0.0.1, env HOST)
+      --root <path>    Extra input: a directory or a single .jsonl file. Repeatable.
+  -v, --version        Print version
+  -h, --help           Show help
+```
+
+Examples:
+
+```bash
+atv --port 9000
+atv --root ~/Downloads/shared-traces --root ./bug-report.jsonl
+```
+
+Extra sources can also be added and removed at runtime from the **Input sources** panel (folder icon, top right).
+
+### Try it with demo data
+
+Clone the repo and run:
+
+```bash
+npm install
+npm run demo        # generates fictional sessions in .demo-home/ and serves only those
+```
+
+## Security & privacy
+
+Agent transcripts often contain source code, file paths and occasionally secrets, so the defaults are strict:
+
+- **Local only.** The server binds to `127.0.0.1` and rejects requests whose `Host` header isn't a loopback name, which blocks DNS-rebinding attacks.
+- **Read-only.** It never writes to your sessions and only reads `.jsonl` files under the configured sources.
+- **No cross-site changes.** Adding or removing sources requires `POST` with `application/json`, so other websites can't trigger it.
+- **Offline.** No network requests, no analytics.
+
+`--host 0.0.0.0` makes **every local session readable from your network**. Only use it on networks you trust.
 
 ## HTTP API
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/sessions` | Rescan and list sessions |
+| `GET /api/sessions` | Rescan sources and list sessions |
 | `GET /api/render?path=<path>` | Structured trace for one session |
 | `GET /api/inputs` | List input sources |
-| `POST /api/inputs` `{"add": "<path>"}` / `{"remove": "<path>"}` | Add / remove an extra source |
+| `POST /api/inputs` with `{"add": "<path>"}` or `{"remove": "<path>"}` | Add / remove an extra source |
+| `GET /session_trace.html?path=<path>` | Full-page view of a single trace |
 
 ## Development
 
 ```bash
+git clone https://github.com/yunmij/agent-trace-viewer.git
+cd agent-trace-viewer
 npm install
-npm start            # runs the .ts sources directly (Node ≥ 22.18 type stripping)
+npm start            # runs the TypeScript sources directly (Node ≥ 22.18 type stripping)
 npm run typecheck
-npm run build        # tsc → dist/ (what gets published; runs on Node ≥ 18)
+npm run build        # tsc → dist/ (this is what gets published; runs on Node ≥ 18)
 ```
+
+The frontend in `web/` is plain browser JS/CSS served as-is — edit and refresh, no build step.
 
 ```
 bin/agent-trace-viewer.ts   CLI entry
 src/config.ts               sources, CLI args, help
 src/scan.ts                 discover sessions + metadata (title / cwd / format)
-src/parse-*.ts              per-agent parsers → unified trace model (src/types.ts)
+src/parse-*.ts              per-agent parsers → one trace model (src/types.ts)
 src/render.ts               /api/render: path checks, cache, format dispatch
-src/server.ts               HTTP routes + static files
+src/server.ts               HTTP routes, static files, host check
 src/pages.ts                HTML shells
-web/                        browser JS/CSS, served as-is (no build step)
+web/                        list.js · trace.js · trace.css
+scripts/make-demo.mjs       fictional demo sessions
 ```
+
+Contributions are welcome — please run `npm run typecheck` before opening a PR.
 
 ## License
 
-MIT
-
----
-
-## 中文说明
-
-本地浏览 / 可视化 AI coding agent 的会话 trace，支持 **Claude Code / Codex / OpenClaw / Hermes**。零运行时依赖，只读，不联网。
-
-```bash
-npx agent-trace-viewer        # 打开 http://localhost:8787
-```
-
-- 所有 agent 的会话统一列表：以首条真实用户输入作为标题，显示项目目录、大小和时间
-- 按 agent 或输入源筛选，多关键词搜索（空格表示 AND），支持自动刷新
-- trace 卡片可折叠：thinking、工具调用和结果（按 id 配对）、token 用量、hook 注入；默认隐藏系统噪声
-- 会话内搜索高亮，Enter / Shift+Enter 跳转；`/` 聚焦搜索，`j` / `k` 切换会话
-- 亮色 / 暗色主题；`--root` 或页面上的「Input sources」面板可以添加任意目录或单个 `.jsonl`
-
-**安全**：默认只监听 `127.0.0.1`，并校验 Host 头防 DNS rebinding。`--host 0.0.0.0` 会把本机全部会话开放给局域网，只在可信网络里用。
+[MIT](LICENSE)

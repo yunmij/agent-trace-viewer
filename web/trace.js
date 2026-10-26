@@ -21,7 +21,10 @@ function mdLight(s){ s=esc(s);
   s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
   return s;
 }
-function fmtTs(ts){ if(!ts) return ""; return String(ts).replace("T"," ").replace(/\.[0-9]+Z?$/,"").replace(/Z$/,"").slice(0,19); }
+// 时间戳多为 UTC ISO 串：按浏览器本地时区显示；解析失败时退回原样截断。
+function fmtTs(ts){ if(!ts) return ""; var d=new Date(ts); if(isNaN(d)) return String(ts).replace("T"," ").slice(0,19);
+  var p=function(n){return String(n).padStart(2,"0");};
+  return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds()); }
 var ROLE={user:{l:"U",n:"User"},assistant:{l:"A",n:"Assistant"},tool:{l:"T",n:"Tool"},system:{l:"S",n:"System"},developer:{l:"D",n:"Developer"}};
 function chip(label){return '<span class="tag">'+esc(label)+'</span>';}
 function pillTag(pill, cls, name){return '<span class="tag pilltag"><span class="pill '+cls+'">'+esc(pill)+'</span><span class="pname">'+esc(name)+'</span></span>';}

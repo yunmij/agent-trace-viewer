@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
@@ -17,6 +18,7 @@
   },
   "scripts": {
     "start": "node bin/agent-trace-viewer.ts",
+    "demo": "node scripts/make-demo.mjs .demo-home && HOME=\"$PWD/.demo-home\" node bin/agent-trace-viewer.ts",
     "typecheck": "tsc --noEmit",
     "build": "rm -rf dist && tsc && node -e \"require('fs').cpSync('web','dist/web',{recursive:true})\"",
     "prepublishOnly": "npm run typecheck && npm run build"
