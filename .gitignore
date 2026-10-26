@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+*.pid
+*.tgz
+.DS_Store
+.playwright-mcp/

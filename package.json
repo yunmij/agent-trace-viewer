@@ -1,0 +1,54 @@
+{
+  "name": "agent-trace-viewer",
+  "version": "1.0.0",
+  "description": "Browse and visualize local AI agent session traces (Claude Code, Codex, OpenClaw, Hermes) in your browser. Zero runtime dependencies.",
+  "type": "module",
+  "bin": {
+    "agent-trace-viewer": "dist/bin/agent-trace-viewer.js",
+    "atv": "dist/bin/agent-trace-viewer.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node bin/agent-trace-viewer.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "rm -rf dist && tsc && node -e \"require('fs').cpSync('web','dist/web',{recursive:true})\"",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.8.0"
+  },
+  "keywords": [
+    "agent",
+    "trace",
+    "viewer",
+    "session",
+    "transcript",
+    "claude-code",
+    "codex",
+    "openclaw",
+    "hermes",
+    "jsonl",
+    "llm",
+    "observability"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yunmij/agent-trace-viewer.git"
+  },
+  "homepage": "https://github.com/yunmij/agent-trace-viewer#readme",
+  "bugs": "https://github.com/yunmij/agent-trace-viewer/issues",
+  "author": "yunmij",
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  }
+}
