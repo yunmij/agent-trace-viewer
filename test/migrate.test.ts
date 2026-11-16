@@ -395,6 +395,35 @@ test("⑭ listBatches：按时间倒序、计数正确，无 manifest 的子目�
   assert.equal(typeof list[0].createdAt, "string");
 });
 
+test("⑭b listBatches 默认保持 summary 形状（无 ops），withOps=true 才透传操作明细", () => {
+  const sb = sandbox();
+  const f = path.join(sb.allowedRoot, "s1.jsonl");
+  writeJsonl(f, [{ type: "session_meta", payload: { cwd: "/old/proj" } }]);
+  const opts = baseOpts({ agent: "codex", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+  migrateSessions([f], opts);
+
+  const def = listBatches(sb.backupRoot);
+  assert.equal(def.length, 1);
+  // 控制器裁定：默认响应不得携带 ops，批次列表保持轻量。
+  assert.deepEqual(Object.keys(def[0]).sort(), ["createdAt", "doneCount", "id", "opCount", "type"]);
+  assert.equal(def[0].ops, undefined);
+
+  const detailed = listBatches(sb.backupRoot, false, true);
+  assert.equal(detailed.length, 1);
+  assert.ok(Array.isArray(detailed[0].ops));
+  assert.equal(detailed[0].ops!.length, 1);
+  const op = detailed[0].ops![0];
+  assert.equal(op.path, f);
+  assert.equal(op.status, "done");
+  assert.equal(op.error, null);
+  assert.equal(op.movedTo, null);
+  assert.deepEqual(op.changes, [{ field: "payload.cwd", from: "/old/proj", to: "/new/proj" }]);
+  // 内部账本字段不得经摘要接口外泄。
+  assert.equal((op as any).backup, undefined);
+  assert.equal((op as any).postHash, undefined);
+  assert.equal((op as any).destCandidates, undefined);
+});
+
 test("rewriteJsonlAtomic：null 表示不改，无变更时不重写文件", () => {
   const sb = sandbox();
   const f = path.join(sb.root, "plain.jsonl");

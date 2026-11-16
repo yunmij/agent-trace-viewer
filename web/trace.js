@@ -156,7 +156,9 @@ async function loadTrace(p, mountSel){
   if(inj) stats["inject"]=inj;
   var chips=Object.keys(stats).map(function(k){return '<span class="stat"><b>'+stats[k]+'</b> '+esc(k.replace("_"," "))+'</span>';}).join('');
   mount.innerHTML='<div class="tracehdr"><div class="tt">'+esc(d.title||d.sessionId)+'</div>'+
-    '<div class="tmeta"><code>'+esc(d.sessionId)+'</code>'+(d.cwd?'<span class="dot">·</span><span title="working directory">'+esc(d.cwd)+'</span>':'')+'</div>'+
+    '<div class="tmeta"><code>'+esc(d.sessionId)+'</code>'+
+    (d.accountLabel?'<span class="dot">·</span><span class="acct" title="'+esc(d.accountId||d.accountLabel)+'">'+esc(d.accountLabel)+'</span>':'')+'</div>'+
+    (d.cwd?'<div class="tmeta cwdrow" title="点击复制完整工作目录"><svg class="ic"><use href="#i-folder"/></svg><code class="copycwd">'+esc(d.cwd)+'</code></div>':'')+
     '<div class="tmeta path" title="'+esc(d.path)+'">'+esc(d.path)+'</div>'+
     '<div class="stats"><span class="stat"><b>'+d.count+'</b> events</span>'+chips+'</div>'+
     '<div class="trow"><div class="tsearch"><svg class="ic"><use href="#i-search"/></svg><input class="tq" placeholder="Find in this session…  (Enter / Shift+Enter)"><span class="tcount"></span><button class="btn ghost xs tprev" title="Previous">▲</button><button class="btn ghost xs tnext" title="Next">▼</button></div>'+
@@ -166,6 +168,16 @@ async function loadTrace(p, mountSel){
   var tr=mount.querySelector(".trace");
   mount.querySelector(".ht").addEventListener("change",function(){tr.classList.toggle("hideticks",this.checked);});
   mount.querySelectorAll("[data-all]").forEach(function(b){b.addEventListener("click",function(){tr.querySelectorAll("details.card").forEach(function(x){x.open=b.dataset.all==="1";});});});
+  // 完整 cwd 行：点击复制（clipboard API 不可用时退回隐藏 textarea + execCommand）。
+  var cwdEl=mount.querySelector(".copycwd");
+  if(cwdEl){
+    cwdEl.addEventListener("click",function(){
+      var text=cwdEl.textContent, done=function(){cwdEl.title="已复制";setTimeout(function(){cwdEl.title="点击复制完整工作目录";},1500);};
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done,done);return;}
+      var ta=document.createElement("textarea");ta.value=text;ta.style.position="fixed";ta.style.opacity="0";
+      document.body.appendChild(ta);ta.select();try{document.execCommand("copy");}catch(e){}document.body.removeChild(ta);done();
+    });
+  }
   setupTraceSearch(mount);
   return d;
 }

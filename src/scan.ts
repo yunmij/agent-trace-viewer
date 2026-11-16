@@ -148,7 +148,8 @@ function collectFiles(): string[] {
 }
 
 // codex 账户标签三分支：本机登录身份优先（邮箱），其次账户备注，最后兜底 account-<id 前 8 位>。
-function codexAccountLabel(
+// scan 列表与 render 详情共用同一规则，避免两处实现漂移。
+export function codexAccountLabel(
   id: string,
   notes: { codex: Record<string, string> },
   auth: AccountInfo | null,

@@ -212,6 +212,33 @@ test("⑥ rollback 未知 id → 400", async () => {
   });
 });
 
+test("⑧ GET /api/migrations 默认 summary 形状，?withOps=1 才带 ops 明细", async () => {
+  const root = path.join(tempHome, "fixtures-8");
+  fs.mkdirSync(root, { recursive: true });
+  const codexFile = path.join(root, "rollout-ops.jsonl");
+  writeLine(codexFile, [{ type: "session_meta", payload: { cwd: "/old/proj" } }]);
+  addInput(root);
+  try {
+    await withServer(async (base) => {
+      const mk = await postJson(base, "/api/migrate", {
+        type: "project", value: path.join(tempHome, "ops-new-proj"), targets: [codexFile],
+      });
+      assert.equal(mk.status, 200);
+
+      const plain = await (await fetch(base + "/api/migrations")).json() as any[];
+      assert.ok(plain.length >= 1);
+      assert.ok(plain.every((b) => b.ops === undefined), "默认响应不得携带 ops");
+
+      const detailed = await (await fetch(base + "/api/migrations?withOps=1")).json() as any[];
+      const mine = detailed.find((b) => b.ops && b.ops.some((op: any) => op.path === codexFile));
+      assert.ok(mine, "withOps=1 响应包含本批 ops 明细");
+      assert.equal(mine.ops[0].status, "done");
+    });
+  } finally {
+    removeInput(root);
+  }
+});
+
 test("⑦ 混合 agent 批次：batchIds 收集全部分组 id，results 保序，两个批次均可查可回滚", async () => {
   const root = path.join(tempHome, "fixtures-7");
   fs.mkdirSync(root, { recursive: true });

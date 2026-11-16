@@ -174,8 +174,11 @@ export function startServer(port: number): http.Server {
         };
         sendJson(res, 200, response);
       } else if (u.pathname === "/api/migrations" && req.method === "GET") {
-        // 默认隐藏 rollback 安全备份批次（listBatches 契约）。
-        sendJson(res, 200, listBatches(backupRoot()));
+        // 默认隐藏 rollback 安全备份批次（listBatches 契约）；
+        // withOps=1 才透传单批操作明细，默认响应保持 summary 形状（控制器裁定）。
+        const includeRollbacks = u.searchParams.get("rollbacks") === "1";
+        const withOps = u.searchParams.get("withOps") === "1";
+        sendJson(res, 200, listBatches(backupRoot(), includeRollbacks, withOps));
       } else if (u.pathname === "/api/migrations/rollback" && req.method === "POST") {
         if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
         const body = await readJson(req);

@@ -57,6 +57,16 @@ export interface Manifest {
   rollbackOf?: string;
 }
 
+// 面板展开用的轻量单批操作视图：只留 UI 展示字段，不带 backup/destCandidates/postHash 等内部账本信息。
+export interface BatchOp {
+  agent: string;
+  path: string;
+  status: "done" | "failed";
+  error: string | null;
+  movedTo: string | null;
+  changes: Change[];
+}
+
 export interface BatchSummary {
   id: string;
   // rollback 类型是安全备份批次，不可再触发回滚（否则产生 rollback-rollback-* 嵌套）；
@@ -65,6 +75,8 @@ export interface BatchSummary {
   createdAt: string;
   opCount: number;
   doneCount: number;
+  // 仅 withOps=true 时透传；默认列表保持 summary 形状，不随批次数增长膨胀。
+  ops?: BatchOp[];
 }
 
 // 与现有 ~/.claude/projects 目录编码一致："/Users/me/proj" → "-Users-me-proj"
@@ -424,7 +436,7 @@ export function readBatch(batchId: string, backupRoot: string): Manifest {
 // 无 manifest / 不可读的子目录与普通文件一律跳过，不抛错。
 // 默认只返回 project/account 迁移批次；rollback 安全备份批次（不可再触发回滚）
 // 仅在显式传 includeRollbacks=true 时列出，避免 UI 对其再次回滚产生 rollback-rollback-* 嵌套。
-export function listBatches(backupRoot: string, includeRollbacks = false): BatchSummary[] {
+export function listBatches(backupRoot: string, includeRollbacks = false, withOps = false): BatchSummary[] {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(backupRoot, { withFileTypes: true });
@@ -441,13 +453,24 @@ export function listBatches(backupRoot: string, includeRollbacks = false): Batch
       continue;
     }
     if (manifest.type === "rollback" && !includeRollbacks) continue;
-    summaries.push({
+    const summary: BatchSummary = {
       id: manifest.id,
       type: manifest.type,
       createdAt: manifest.createdAt,
       opCount: manifest.ops.length,
       doneCount: manifest.ops.filter((op) => op.status === "done").length,
-    });
+    };
+    if (withOps) {
+      summary.ops = manifest.ops.map((op) => ({
+        agent: op.agent,
+        path: op.path,
+        status: op.status,
+        error: op.error,
+        movedTo: op.movedTo,
+        changes: op.changes,
+      }));
+    }
+    summaries.push(summary);
   }
   // createdAt 为 ISO 字符串可直接字典序比较；同刻内以 id 倒序兜底。
   summaries.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));

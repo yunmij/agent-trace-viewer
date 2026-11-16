@@ -39,6 +39,10 @@ export interface RenderResult {
   title: string;
   count: number;
   events: TraceEvent[];
+  // 账户归属：codex 取首条 session_meta 的 creator_account_id（parser 落 id，
+  // label 由 render 层按三分支规则贴）；claude 取本机共享身份；openclaw/hermes 留空。
+  accountId?: string;
+  accountLabel?: string;
 }
 
 export interface RenderError {
