@@ -233,3 +233,97 @@ test("rewriteJsonlAtomic：null 表示不改，无变更时不重写文件", () 
 test("encodeClaudeProject：斜杠转连字符且前导斜杠变前导连字符", () => {
   assert.equal(encodeClaudeProject("/Users/me/proj"), "-Users-me-proj");
 });
+
+// ---- fix round 1 回归：I1 failed 项 postHash ----
+
+test("I1：文件仍在的 failed 项回填 postHash；无文件场景省略且 error 说明原因", () => {
+  const sb = sandbox();
+  const txt = path.join(sb.allowedRoot, "note.txt");
+  fs.writeFileSync(txt, "hello");
+  const outside = path.join(sb.root, "elsewhere", "outside.jsonl");
+  fs.mkdirSync(path.dirname(outside), { recursive: true });
+  writeJsonl(outside, [{ cwd: "/old/proj" }]);
+  const missing = path.join(sb.allowedRoot, "missing.jsonl");
+  const hermesRef = path.join(sb.allowedRoot, "synthetic::ref.jsonl");
+  const opts = baseOpts({ agent: "codex", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+
+  const res = migrateSessions([txt, outside, missing, hermesRef], opts);
+  const byPath = new Map(res.results.map((r) => [r.path, r]));
+  assert.equal(byPath.get(txt)!.postHash, sha256(txt), ".txt failed 项带 postHash");
+  assert.equal(byPath.get(outside)!.postHash, sha256(outside), "越界 failed 项带 postHash");
+  assert.equal(byPath.has(missing), true);
+  assert.equal(byPath.get(missing)!.postHash, undefined, "不存在 target 省略 postHash");
+  assert.match(byPath.get(missing)!.error!, /postHash omitted/);
+  assert.equal(byPath.get(hermesRef)!.postHash, undefined, "hermes 合成引用省略 postHash");
+  assert.match(byPath.get(hermesRef)!.error!, /postHash omitted/);
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(sb.backupRoot, res.batchId, "manifest.json"), "utf8"));
+  const mByPath = new Map<string, any>(manifest.ops.map((op: any) => [op.path, op]));
+  assert.equal(mByPath.get(txt).postHash, sha256(txt));
+  assert.equal(Object.hasOwn(mByPath.get(missing), "postHash"), false, "manifest 无文件项不得出现 postHash 键");
+  assert.equal(Object.hasOwn(mByPath.get(hermesRef), "postHash"), false);
+});
+
+// ---- fix round 1 回归：I2/I3 非覆盖移动（link + unlink）----
+
+test("I3：link 失败路径（目标目录只读）源文件完全未触碰", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "claude-session.jsonl");
+  const original = [{ cwd: "/old/proj" }, { cwd: "/old/proj" }];
+  writeJsonl(src, original);
+  const destDir = path.join(sb.claudeRoot, encodeClaudeProject("/new/proj"));
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.chmodSync(destDir, 0o555); // 预建只读目录：existsSync(dest)=false，但 linkSync 原子抛 EACCES
+  const srcBefore = fs.readFileSync(src);
+  const opts = baseOpts({ agent: "claude", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+  try {
+    const res = migrateSessions([src], opts);
+    assert.equal(res.results[0].status, "failed");
+    assert.match(res.results[0].error!, /non-overwriting move failed \(EACCES\)/);
+    assert.deepEqual(fs.readFileSync(src), srcBefore, "link 失败时源文件字节不变");
+    assert.deepEqual(readJsonl(src), original, "源文件内容未被改写");
+    assert.equal(fs.existsSync(path.join(destDir, "claude-session.jsonl")), false, "不应产生 dest 副本");
+  } finally {
+    fs.chmodSync(destDir, 0o755);
+  }
+});
+
+test("I2/I3：link 成功但 unlink 失败 → 两份副本保留、报 failed、dest 不被改写", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "claude-session.jsonl");
+  const original = [{ cwd: "/old/proj" }, { cwd: "/old/proj" }];
+  writeJsonl(src, original);
+  // 源目录只读：备份阶段仍可读，移动阶段 link 成功后 unlink 被 EACCES 拒绝。
+  fs.chmodSync(sb.allowedRoot, 0o555);
+  const opts = baseOpts({ agent: "claude", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+  try {
+    const res = migrateSessions([src], opts);
+    assert.equal(res.results[0].status, "failed");
+    assert.match(res.results[0].error!, /both copies kept/);
+    assert.ok(fs.existsSync(src), "源文件仍在");
+    const dest = path.join(sb.claudeRoot, encodeClaudeProject("/new/proj"), "claude-session.jsonl");
+    assert.ok(fs.existsSync(dest), "dest 副本也在");
+    assert.deepEqual(readJsonl(dest), original, "unlink 失败后不得继续改写 dest");
+    assert.deepEqual(readJsonl(src), original);
+  } finally {
+    fs.chmodSync(sb.allowedRoot, 0o755);
+  }
+});
+
+test("I3：预置同名 dest 时 link 不变量兜底，源文件与预置文件均不变", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "claude-session.jsonl");
+  writeJsonl(src, [{ cwd: "/old/proj" }]);
+  const destDir = path.join(sb.claudeRoot, encodeClaudeProject("/new/proj"));
+  fs.mkdirSync(destDir, { recursive: true });
+  const dest = path.join(destDir, "claude-session.jsonl");
+  fs.writeFileSync(dest, "preexisting\n");
+  const srcBefore = fs.readFileSync(src);
+  const opts = baseOpts({ agent: "claude", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+
+  const res = migrateSessions([src], opts);
+  assert.equal(res.results[0].status, "failed");
+  assert.equal(fs.readFileSync(dest, "utf8"), "preexisting\n");
+  assert.deepEqual(fs.readFileSync(src), srcBefore);
+  assert.equal(res.results[0].postHash, sha256(src), "failed 项同样回填 postHash");
+});

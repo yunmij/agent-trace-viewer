@@ -52,6 +52,17 @@ function sha256File(p: string): string {
   return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 }
 
+// failed 项也要尽量回填 postHash：按候选路径找第一个仍存在的普通文件算 sha256；
+// 无文件场景（hermes 合成引用 / target 不存在）返回 undefined，由调用方在 error 中说明。
+function tryPostHash(...candidates: string[]): string | undefined {
+  for (const p of candidates) {
+    try {
+      if (fs.statSync(p).isFile()) return sha256File(p);
+    } catch {}
+  }
+  return undefined;
+}
+
 // 逐行改写 JSONL 并原子覆盖。
 // - mapRecord 返回 null 表示该行不改（原始字符串原样回写，不做重新序列化）；
 // - JSON.parse 失败的行保留原始字符串并计数，绝不丢行；
@@ -123,10 +134,10 @@ interface Prepared {
 
 function prepareTarget(target: string, allowedRoots: string[], batchDir: string): Prepared {
   const abs = path.resolve(target);
-  // Hermes 合成引用（state.db 内的虚拟路径），不触碰。
-  if (abs.includes("::")) return { target: abs, real: abs, ok: false, error: "hermes synthetic ref is not migratable", backupRel: null };
+  // Hermes 合成引用（state.db 内的虚拟路径），磁盘上无文件，不触碰。
+  if (abs.includes("::")) return { target: abs, real: abs, ok: false, error: "hermes synthetic ref is not migratable; postHash omitted: no backing file on disk", backupRel: null };
   let st: fs.Stats;
-  try { st = fs.statSync(abs); } catch { return { target: abs, real: abs, ok: false, error: "target does not exist", backupRel: null }; }
+  try { st = fs.statSync(abs); } catch { return { target: abs, real: abs, ok: false, error: "target does not exist; postHash omitted: no backing file on disk", backupRel: null }; }
   if (!st.isFile() || !abs.endsWith(".jsonl")) {
     return { target: abs, real: abs, ok: false, error: "target must be an existing .jsonl regular file", backupRel: null };
   }
@@ -213,8 +224,10 @@ export function migrateSessions(targets: string[], opts: MigrateOpts): MigrateRe
   for (const item of prepared) {
     const changes: Change[] = [];
     if (!item.ok) {
-      results.push({ path: item.target, status: "failed", error: item.error, changes });
-      manifestOps.push({ agent: opts.agent, path: item.target, movedTo: null, changes, backup: item.backupRel, status: "failed", error: item.error ?? null });
+      // I1：文件仍在磁盘上的 failed 项（越界 / 非 .jsonl / 备份异常等）回填 postHash。
+      const postHash = tryPostHash(item.real, item.target);
+      results.push({ path: item.target, status: "failed", error: item.error, changes, ...(postHash ? { postHash } : {}) });
+      manifestOps.push({ agent: opts.agent, path: item.target, movedTo: null, changes, backup: item.backupRel, ...(postHash ? { postHash } : {}), status: "failed", error: item.error ?? null });
       continue;
     }
     try {
@@ -222,11 +235,23 @@ export function migrateSessions(targets: string[], opts: MigrateOpts): MigrateRe
       if (opts.agent === "claude") {
         const destDir = path.join(opts.claudeRoot, encodeClaudeProject(value));
         const dest = path.join(destDir, path.basename(item.real));
-        // 同名已存在：绝不覆盖，且在任何改写之前中止。
-        if (fs.existsSync(dest)) throw new Error(`destination already exists: ${dest}`);
-        rewriteJsonlAtomic(item.real, claudeProjectMapper(value, changes), changes);
         fs.mkdirSync(destDir, { recursive: true });
-        fs.renameSync(item.real, dest);
+        // existsSync 只用于生成可读错误；真正的「绝不覆盖」不变量由 linkSync 的原子 EEXIST 保证（消除 TOCTOU）。
+        if (fs.existsSync(dest)) throw new Error(`destination already exists: ${dest}`);
+        try {
+          // 先移动后改写：link 不修改源文件，失败时源文件完全未触碰。
+          fs.linkSync(item.real, dest);
+        } catch (e) {
+          const code = (e as NodeJS.ErrnoException).code || (e as Error).message;
+          throw new Error(`non-overwriting move failed (${code}): ${dest}`);
+        }
+        try {
+          fs.unlinkSync(item.real);
+        } catch (e) {
+          // 边角：link 成功但 unlink 失败 → 两份副本都在。不得继续改写 dest，保留现场报 failed。
+          throw new Error(`linked destination but failed to remove source, both copies kept: ${(e as Error).message}`);
+        }
+        rewriteJsonlAtomic(dest, claudeProjectMapper(value, changes), changes);
         movedTo = dest;
       } else if (opts.agent === "codex") {
         rewriteJsonlAtomic(item.real, codexProjectMapper(value, changes), changes);
@@ -239,8 +264,14 @@ export function migrateSessions(targets: string[], opts: MigrateOpts): MigrateRe
       manifestOps.push({ agent: opts.agent, path: item.target, movedTo: movedTo ?? null, changes, backup: item.backupRel, postHash, status: "done", error: null });
     } catch (e) {
       const error = (e as Error).message;
-      results.push({ path: item.target, status: "failed", error, changes });
-      manifestOps.push({ agent: opts.agent, path: item.target, movedTo: null, changes, backup: item.backupRel, status: "failed", error });
+      // I1：执行期 failed 同样回填操作后文件的 sha256。源文件仍在时以源为准；
+      // 源已移除（link+unlink 成功后改写失败）才取 dest。
+      const destGuess = opts.agent === "claude"
+        ? path.join(opts.claudeRoot, encodeClaudeProject(value), path.basename(item.real))
+        : item.real;
+      const postHash = tryPostHash(item.real, destGuess, item.target);
+      results.push({ path: item.target, status: "failed", error, changes, ...(postHash ? { postHash } : {}) });
+      manifestOps.push({ agent: opts.agent, path: item.target, movedTo: null, changes, backup: item.backupRel, ...(postHash ? { postHash } : {}), status: "failed", error });
     }
   }
 
