@@ -1,5 +1,5 @@
 {
-  "//": "开发期靠 Node ≥22.18 原生类型擦除直接跑 .ts（npm start）。发布时 tsc 编译到 dist/：rewriteRelativeImportExtensions 把 .ts 相对导入改写为 .js，使安装态（node_modules 内，禁用 strip）也能跑。typecheck 用 `tsc --noEmit`。",
+  "//": "开发期靠 Node ≥22.18 原生类型擦除直接跑 .ts（npm start）。发布时 tsc 编译到 dist/：rewriteRelativeImportExtensions 把 .ts 相对导入改写为 .js，使安装态（node_modules 内，禁用 strip）也能跑。构建只含 bin/src；测试类型检查走 tsconfig.test.json（typecheck 脚本）。",
   "compilerOptions": {
     "target": "es2023",
     "lib": ["es2023"],
@@ -16,5 +16,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["bin", "src", "test"]
+  "include": ["bin", "src"]
 }

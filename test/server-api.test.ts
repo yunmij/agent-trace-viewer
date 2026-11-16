@@ -126,6 +126,10 @@ test("③ target 查不到 agent / 含 :: → 400；扫描已知但 migrate 不�
       assert.equal(data.results[0].path, claudeFile);
       assert.equal(data.results[0].status, "failed");
       assert.match(data.results[0].error, /codex/);
+      // failed 项同样经白名单投影：内部账本键（failed OpResult 也可能带 postHash）不得泄露。
+      for (const k of ["postHash", "backup", "destCandidates"]) {
+        assert.equal(k in data.results[0], false, `migrate failed 响应不得携带 ${k}`);
+      }
     });
   } finally {
     removeInput(root);
@@ -181,6 +185,13 @@ test("⑤ happy path：codex 工程迁移成功 → 批次可查 → 回滚还�
       assert.equal(migrated.results[0].status, "done", migrated.results[0].error);
       assert.equal(readLines(codexFile)[0].payload.cwd, newValue);
 
+      // 安全收尾：迁移响应只暴露白名单字段，postHash / backup / destCandidates 等内部账本键不得出现。
+      const INTERNAL_KEYS = ["postHash", "backup", "destCandidates"];
+      for (const op of migrated.results) {
+        for (const k of INTERNAL_KEYS) assert.equal(k in op, false, `migrate 响应不得携带 ${k}`);
+        assert.deepEqual(Object.keys(op).sort(), ["changes", "path", "status"]);
+      }
+
       const listRes = await fetch(base + "/api/migrations");
       assert.equal(listRes.status, 200);
       const batches = await listRes.json() as any[];
@@ -191,6 +202,11 @@ test("⑤ happy path：codex 工程迁移成功 → 批次可查 → 回滚还�
       assert.equal(rb.status, 200);
       const rbData = await rb.json() as any;
       assert.equal(rbData.results[0].status, "done", rbData.results[0].error);
+      // 回滚响应同样走白名单投影，内部账本键不得出现在 HTTP JSON 中。
+      for (const op of rbData.results) {
+        for (const k of INTERNAL_KEYS) assert.equal(k in op, false, `rollback 响应不得携带 ${k}`);
+        assert.deepEqual(Object.keys(op).sort(), ["changes", "path", "status"]);
+      }
       assert.deepEqual(readLines(codexFile), original, "回滚后内容字节语义还原");
 
       // 回滚产生的 rollback 安全备份批次仍不在默认列表里。

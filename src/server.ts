@@ -19,6 +19,21 @@ function backupRoot(): string {
 
 const MIGRATE_AGENTS = new Set(["claude", "codex", "openclaw"]);
 
+// HTTP 出参白名单投影：OpResult 里的 postHash（以及 manifest 层才有的 backup /
+// destCandidates，防御性一并排除）属于内部账本字段，不得随迁移/回滚响应离开服务边界。
+// 只保留 UI 需要的 path / status / error / movedTo / changes，migrate.ts 内部与磁盘
+// manifest 的结构不受影响。
+const OP_RESULT_PUBLIC_KEYS = ["path", "status", "error", "movedTo", "changes"] as const;
+function projectOpResult(op: OpResult): Record<string, unknown> {
+  const raw = op as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const k of OP_RESULT_PUBLIC_KEYS) {
+    const v = raw[k];
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
 const WEB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
 const STATIC_TYPES: Record<string, string> = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
 
@@ -170,7 +185,7 @@ export function startServer(port: number): http.Server {
         const response: MigrateResult & { batchIds: string[] } = {
           batchId: batchIds[0],
           batchIds,
-          results: targets.map((t) => merged.get(t) as OpResult),
+          results: targets.map((t) => projectOpResult(merged.get(t) as OpResult) as OpResult),
         };
         sendJson(res, 200, response);
       } else if (u.pathname === "/api/migrations" && req.method === "GET") {
@@ -191,7 +206,8 @@ export function startServer(port: number): http.Server {
         } catch (e) {
           sendJson(res, 400, { ok: false, error: (e as Error).message }); return;
         }
-        sendJson(res, 200, rollbackBatch(body.id, root));
+        const rollback = rollbackBatch(body.id, root);
+        sendJson(res, 200, { batchId: rollback.batchId, results: rollback.results.map(projectOpResult) });
       } else { res.writeHead(404); res.end("not found"); }
     } catch (e) { if (!res.headersSent) { res.writeHead(500); } res.end("internal error"); }
   });

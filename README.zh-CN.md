@@ -52,10 +52,12 @@ agent-trace-viewer        # 或者用短命令 atv
 | 🔎 **筛选与搜索** | 带数量的 agent 药丸按钮；按输入源筛选；在标题、会话 id、项目、路径里做多关键词搜索；agent 运行时可以开自动刷新 |
 | 🧵 **好读的 trace** | user / assistant / tool / system 卡片可以逐个折叠。思考、工具调用及结果（按 id 配对）、报错、token 用量、hook 和上下文注入都有标注，低价值的系统噪声默认隐藏 |
 | 🎯 **会话内搜索** | 高亮全部命中，Enter / Shift+Enter 跳转，折叠的卡片会自动展开 |
+| 🪪 **账户与工程** | 每行显示项目目录，并在 agent 有记录时显示运行该会话的账户。Codex 会话带会话级账户 ID（映射到登录邮箱或自定义备注）；Claude 只显示一个共享的本机身份；OpenClaw 和 Hermes 没有账户概念。列表可按项目或账户筛选 |
+| 🚚 **批量迁移与回滚** | 可以一次性把选中的会话迁移到另一个项目目录，或把 Codex 会话改挂到另一个账户。每个目标 `.jsonl` 改动前都会自动备份到 `~/.agent-trace-viewer/backups`，批次可在 sha256 漂移检测后回滚。不支持 Claude 账号迁移，Hermes（SQLite）不可迁移 |
 | ⌨️ **键盘友好** | `/` 聚焦搜索，`j` / `k`（或 ↑ / ↓）切换会话 |
 | 🌗 **亮色 / 暗色** | 默认跟随系统，随时可以切换 |
 | 📁 **任意 JSONL** | 可以额外指定目录或单个文件，格式（Claude / Codex / OpenClaw）按内容自动识别 |
-| 🪶 **轻量** | 零运行时依赖，包体积约 40 KB，只读 |
+| 🪶 **轻量** | 零运行时依赖，包体积约 40 KB，默认只读 |
 
 <img src="https://raw.githubusercontent.com/yunmij/agent-trace-viewer/main/docs/screenshot-dark.png" alt="暗色主题、会话内搜索与失败的工具调用" width="900">
 
@@ -63,10 +65,10 @@ agent-trace-viewer        # 或者用短命令 atv
 
 | Agent | 默认位置 | 说明 |
 |---|---|---|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/**/*.jsonl` | thinking、工具调用和结果、hook / attachment 注入、usage |
-| [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/**/rollout-*.jsonl` | reasoning 摘要（加密推理内容不可见）、function call、token 汇总 |
-| [OpenClaw](https://github.com/openclaw/openclaw) | `~/.openclaw/agents/**/*.jsonl` | 普通会话日志和 trajectory 快照 |
-| Hermes | `~/.hermes/state.db` | 读 SQLite，包括压缩过的历史和会话级汇总 |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/**/*.jsonl` | thinking、工具调用和结果、hook / attachment 注入、usage。所有会话共享一个本机身份；支持工程迁移，**不支持账号迁移** |
+| [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/**/rollout-*.jsonl` | reasoning 摘要（加密推理内容不可见）、function call、token 汇总。带会话级账户 ID，可映射到登录邮箱或自定义备注；工程迁移和账号迁移都支持 |
+| [OpenClaw](https://github.com/openclaw/openclaw) | `~/.openclaw/agents/**/*.jsonl` | 普通会话日志和 trajectory 快照。没有账户概念；支持工程迁移 |
+| Hermes | `~/.hermes/state.db` | 读 SQLite，包括压缩过的历史和会话级汇总。没有账户概念；**只读，不可迁移** |
 
 缺了你在用的格式？欢迎带一份脱敏样例[提 issue](https://github.com/yunmij/agent-trace-viewer/issues)。
 
@@ -101,11 +103,26 @@ npm run demo        # 在 .demo-home/ 生成虚构会话，只展示这些数据
 agent 会话里常有源码、文件路径，偶尔还有密钥，所以默认配置比较严：
 
 - **只在本机**：监听 `127.0.0.1`，并拒绝 `Host` 头不是本机名的请求，防 DNS rebinding
-- **只读**：从不修改会话文件，只读取输入源下的 `.jsonl`
-- **防跨站**：增删输入源必须是 `POST` + `application/json`，其他网站没法触发
+- **默认只读**：浏览功能从不修改会话文件，只读取输入源下的 `.jsonl`。可选的迁移功能是唯一的写操作，且仅限会话 `.jsonl` 文件：每次迁移前都会把原件备份到 `~/.agent-trace-viewer/backups`，批次可在 sha256 漂移检测后回滚，文件被外部改动时拒绝还原
+- **防跨站**：增删输入源、保存备注、执行迁移都必须是 `POST` + `application/json`，其他网站没法触发
 - **离线**：不发任何网络请求，没有统计
 
 `--host 0.0.0.0` 会让**局域网里的设备都能读到你本机的全部会话**，只在可信网络里用。
+
+## HTTP 接口
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/sessions` | 重新扫描输入源并列出会话 |
+| `GET /api/render?path=<path>` | 获取单个会话的结构化 trace |
+| `GET /api/inputs` | 列出输入源 |
+| `POST /api/inputs`，请求体 `{"add": "<path>"}` 或 `{"remove": "<path>"}` | 增加 / 移除额外输入源 |
+| `GET /api/identity` | 本机 Claude / Codex 身份与已保存的账户备注 |
+| `POST /api/identity/notes`，请求体 `{"accountId": "<id>", "label": "<text>"}` | 为 Codex 账户保存自定义备注 |
+| `POST /api/migrate`，请求体 `{"type": "project"\|"account", "value": "<路径|账户ID>", "userId": "<id>", "targets": ["<path>", ...]}` | 批量工程或账号迁移，每个目标自动备份 |
+| `GET /api/migrations?withOps=1&rollbacks=1` | 按时间倒序列出迁移批次；`withOps=1` 带单项操作明细，`rollbacks=1` 同时列出回滚安全备份批次 |
+| `POST /api/migrations/rollback`，请求体 `{"id": "<batchId>"}` | 在 sha256 漂移检测通过后回滚指定批次 |
+| `GET /session_trace.html?path=<path>` | 单条 trace 的整页视图 |
 
 ## 开发
 
