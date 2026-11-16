@@ -55,11 +55,18 @@ export interface SessionRow {
   title: string;
   cwd: string;
   path: string;
+  // 账户归属：codex 取首条 session_meta 的 creator_account_id；claude 取本机共享身份。
+  // openclaw / hermes 无账户概念，保持 undefined。
+  accountId?: string;
+  accountLabel?: string;
 }
 
 export interface StructMeta {
   cwd: string;
   title: string;
+  // 仅 codex：首条 session_meta.payload 的 creator 字段；后续内嵌 meta 一律忽略。
+  accountId?: string;
+  accountUserId?: string;
 }
 
 export interface AddResult {

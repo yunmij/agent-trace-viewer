@@ -1,12 +1,23 @@
 // scan.ts — 数据源扫描：发现 .jsonl、抽取会话元数据（cwd / 标题 / format / 行数）、生成列表
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { toText, codexText } from "./text.ts";
 import { CLAUDE_ROOT, OC_ROOT, CODEX_ROOT, allInputs } from "./config.ts";
 import { listHermesSessions } from "./parse-hermes.ts";
+import { getClaudeIdentity, getCodexAuthIdentity, readAccountNotes } from "./identity.ts";
+import type { AccountInfo } from "./identity.ts";
 import type { Rec, SessionRow, StructMeta } from "./types.ts";
 
-interface FileMeta { mtimeMs: number; lines: number; cwd: string; title: string; format: "claude" | "codex" | "openclaw"; }
+interface FileMeta {
+  mtimeMs: number;
+  lines: number;
+  cwd: string;
+  title: string;
+  format: "claude" | "codex" | "openclaw";
+  accountId?: string;
+  accountUserId?: string;
+}
 const fileMetaCache = new Map<string, FileMeta>();
 
 // 取元数据时只看开头若干条记录：codex 开头常有大段 developer/环境注入，需多看几条才碰到真实提问。
@@ -45,7 +56,16 @@ function titleOf(t: string): string {
 //   title: 首条真实 user 文本
 export function structMetaFromRecords(recs: Rec[]): StructMeta {
   let cwd = "", title = "";
+  let accountId: string | undefined, accountUserId: string | undefined;
+  let metaSeen = false; // 只有首条 session_meta 对归属有权威性，后续内嵌 meta 忽略。
   for (const r of recs) {
+    if (r.type === "session_meta" && !metaSeen) {
+      metaSeen = true;
+      const aid = r.payload?.creator_account_id;
+      const uid = r.payload?.creator_user_id;
+      if (typeof aid === "string") accountId = aid;
+      if (typeof uid === "string") accountUserId = uid;
+    }
     if (!cwd) {
       if (r.type === "session_meta" && r.payload?.cwd) cwd = String(r.payload.cwd);
       else if (typeof r.cwd === "string") cwd = r.cwd;
@@ -61,7 +81,7 @@ export function structMetaFromRecords(recs: Rec[]): StructMeta {
     }
     if (cwd && title) break;
   }
-  return { cwd, title };
+  return { cwd, title, accountId, accountUserId };
 }
 
 // 仅有原始文本时（如扫盘列表）用此变体。
@@ -93,7 +113,15 @@ function fileMeta(p: string, mtimeMs: number): FileMeta {
   let lines = 0, text = "";
   try { text = fs.readFileSync(p, "utf8"); for (let i = 0; i < text.length; i++) if (text[i] === "\n") lines++; } catch {}
   const sm = structMeta(text);
-  const meta: FileMeta = { mtimeMs, lines, cwd: sm.cwd, title: sm.title, format: detectFormat(text) };
+  const meta: FileMeta = {
+    mtimeMs,
+    lines,
+    cwd: sm.cwd,
+    title: sm.title,
+    format: detectFormat(text),
+    accountId: sm.accountId,
+    accountUserId: sm.accountUserId,
+  };
   fileMetaCache.set(p, meta);
   return meta;
 }
@@ -119,7 +147,23 @@ function collectFiles(): string[] {
   });
 }
 
-export function scanSessions(): SessionRow[] {
+// codex 账户标签三分支：本机登录身份优先（邮箱），其次账户备注，最后兜底 account-<id 前 8 位>。
+function codexAccountLabel(
+  id: string,
+  notes: { codex: Record<string, string> },
+  auth: AccountInfo | null,
+): string {
+  if (auth && id === auth.id) return auth.label;
+  const note = notes.codex[id];
+  if (note) return note;
+  return `account-${id.slice(0, 8)}`;
+}
+
+export function scanSessions(homeDir: string = os.homedir()): SessionRow[] {
+  // 身份与备注每次扫描只读一次，跨所有行复用，避免逐文件读凭据。
+  const claudeIdentity = getClaudeIdentity(homeDir);
+  const codexAuth = getCodexAuthIdentity(homeDir);
+  const notes = readAccountNotes(homeDir);
   const rows: SessionRow[] = [];
   for (const f of collectFiles()) {
     let st: fs.Stats; try { st = fs.statSync(f); } catch { continue; }
@@ -130,7 +174,7 @@ export function scanSessions(): SessionRow[] {
       : f.startsWith(CLAUDE_ROOT) ? "claude"
       : (meta.format || "claude");
     const isCodex = agent === "codex";
-    rows.push({
+    const row: SessionRow = {
       mtime: st.mtimeMs,
       mtimeStr: new Date(st.mtimeMs).toLocaleString("sv-SE").slice(0, 19),
       size: st.size,
@@ -140,9 +184,22 @@ export function scanSessions(): SessionRow[] {
       title: meta.title,
       cwd: meta.cwd,
       path: f,
-    });
+    };
+    if (isCodex) {
+      // 缺 session_meta 的异常文件不挂账户字段。
+      if (meta.accountId) {
+        row.accountId = meta.accountId;
+        row.accountLabel = codexAccountLabel(meta.accountId, notes, codexAuth);
+      }
+    } else if (agent === "claude" && claudeIdentity) {
+      // 本机 claude 身份是共享的：所有 claude 行挂同一 id/label；读不到则两字段留空。
+      row.accountId = claudeIdentity.id;
+      row.accountLabel = claudeIdentity.label;
+    }
+    // openclaw 行无账户概念，字段保持 undefined。
+    rows.push(row);
   }
-  // hermes 会话来自 SQLite state.db（非 walk 的 .jsonl），单独并入。
+  // hermes 会话来自 SQLite state.db（非 walk 的 .jsonl），单独并入；同样不挂账户字段。
   for (const r of listHermesSessions()) rows.push(r);
   rows.sort((a, b) => b.mtime - a.mtime);
   return rows;
