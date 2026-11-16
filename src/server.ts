@@ -2,11 +2,22 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { HOST, DEFAULT_ROOTS, HERMES_DB, extraInputs, addInput, removeInput, readVersion } from "./config.ts";
+import { HOST, DEFAULT_ROOTS, HERMES_DB, extraInputs, addInput, removeInput, readVersion, allInputs, CLAUDE_ROOT } from "./config.ts";
 import { scanSessions } from "./scan.ts";
 import { renderTranscript } from "./render.ts";
 import { LIST_PAGE, tracePage } from "./pages.ts";
+import { getClaudeIdentity, getCodexAuthIdentity, readAccountNotes, saveAccountNote } from "./identity.ts";
+import { migrateSessions, listBatches, readBatch, rollbackBatch, type MigrateResult, type OpResult } from "./migrate.ts";
+
+// 迁移批次备份根：~/.agent-trace-viewer/backups（控制器裁定）。请求时取 homedir，
+// 以便测试在导入模块前改写 HOME 后仍落到临时目录。
+function backupRoot(): string {
+  return path.join(os.homedir(), ".agent-trace-viewer", "backups");
+}
+
+const MIGRATE_AGENTS = new Set(["claude", "codex", "openclaw"]);
 
 const WEB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
 const STATIC_TYPES: Record<string, string> = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
@@ -54,6 +65,11 @@ function sendJson(res: http.ServerResponse, status: number, data: unknown): void
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" }); res.end(JSON.stringify(data));
 }
 
+// POST 统一只收 application/json（与 /api/inputs 同一纪律）；不合规直接 415。
+function jsonContentType(req: http.IncomingMessage): boolean {
+  return String(req.headers["content-type"] ?? "").startsWith("application/json");
+}
+
 export function startServer(port: number): http.Server {
   const server = http.createServer(async (req, res) => {
     if (!hostAllowed(req)) { res.writeHead(403); res.end("forbidden host"); return; }
@@ -76,12 +92,98 @@ export function startServer(port: number): http.Server {
         // 读用 GET；增删只走 POST + application/json（跨站请求需 CORS 预检，本服务不放行）。
         let result: { ok: boolean; error?: string } = { ok: true };
         if (req.method === "POST") {
-          if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
+          if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
           const body = await readJson(req);
           if (typeof body.add === "string" && body.add) result = addInput(body.add);
           if (typeof body.remove === "string" && body.remove) removeInput(body.remove);
         }
         sendJson(res, result.ok ? 200 : 400, { ...result, defaults: DEFAULT_ROOTS, extra: extraInputs });
+      } else if (u.pathname === "/api/identity" && req.method === "GET") {
+        sendJson(res, 200, {
+          claude: getClaudeIdentity(),
+          codex: getCodexAuthIdentity(),
+          notes: readAccountNotes(),
+        });
+      } else if (u.pathname === "/api/identity/notes" && req.method === "POST") {
+        if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
+        const body = await readJson(req);
+        if (typeof body.accountId !== "string" || !body.accountId || typeof body.label !== "string" || !body.label) {
+          sendJson(res, 400, { ok: false, error: "accountId and label must be non-empty strings" }); return;
+        }
+        saveAccountNote(body.accountId, body.label);
+        sendJson(res, 200, { ok: true });
+      } else if (u.pathname === "/api/migrate" && req.method === "POST") {
+        if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
+        const body = await readJson(req);
+        // 校验顺序（控制器裁定）：targets 非空数组 → 单次扫描建 path→agent 映射 →
+        // 查不到 agent 400 → hermes 合成引用 400 → project value 必须绝对路径 400。
+        if (!Array.isArray(body.targets) || body.targets.length === 0
+          || !body.targets.every((t) => typeof t === "string")) {
+          sendJson(res, 400, { ok: false, error: "targets must be a non-empty string array" }); return;
+        }
+        const targets = body.targets as string[];
+        const agentByPath = new Map<string, string>(scanSessions().map((r) => [r.path, r.agent]));
+        for (const t of targets) {
+          if (!agentByPath.has(t)) { sendJson(res, 400, { ok: false, error: `unknown agent for target: ${t}` }); return; }
+          if (t.includes("::")) { sendJson(res, 400, { ok: false, error: `hermes synthetic ref is not migratable: ${t}` }); return; }
+        }
+        if (body.type !== "project" && body.type !== "account") {
+          sendJson(res, 400, { ok: false, error: "type must be 'project' or 'account'" }); return;
+        }
+        if (typeof body.value !== "string" || !body.value) {
+          sendJson(res, 400, { ok: false, error: "value must be a non-empty string" }); return;
+        }
+        if (body.type === "project" && !path.isAbsolute(body.value)) {
+          sendJson(res, 400, { ok: false, error: "project migration value must be an absolute path" }); return;
+        }
+        if (body.userId !== undefined && typeof body.userId !== "string") {
+          sendJson(res, 400, { ok: false, error: "userId must be a string when provided" }); return;
+        }
+        // MigrateOpts 只有单 agent 字段：按 agent 分组各跑一次 migrateSessions。
+        // 混合批次的合并语义：响应保持 MigrateResult 形状，batchId 取首个分组（按 target
+        // 首次出现顺序）的批次 id，results 按原 targets 顺序归并；磁盘上每组各留一份 manifest，
+        // GET /api/migrations 会分别列出。
+        const groups = new Map<string, string[]>();
+        for (const t of targets) {
+          const agent = agentByPath.get(t) as string;
+          if (!MIGRATE_AGENTS.has(agent)) { sendJson(res, 400, { ok: false, error: `unsupported agent for target: ${t}` }); return; }
+          const list = groups.get(agent);
+          if (list) list.push(t); else groups.set(agent, [t]);
+        }
+        const root = backupRoot();
+        const merged = new Map<string, OpResult>();
+        let batchId = "";
+        for (const [agent, groupTargets] of groups) {
+          const r = migrateSessions(groupTargets, {
+            type: body.type,
+            value: body.value,
+            ...(typeof body.userId === "string" ? { userId: body.userId } : {}),
+            allowedRoots: allInputs(),
+            claudeRoot: CLAUDE_ROOT,
+            backupRoot: root,
+            agent: agent as "claude" | "codex" | "openclaw",
+          });
+          if (!batchId) batchId = r.batchId;
+          for (const item of r.results) merged.set(item.path, item);
+        }
+        const response: MigrateResult = { batchId, results: targets.map((t) => merged.get(t) as OpResult) };
+        sendJson(res, 200, response);
+      } else if (u.pathname === "/api/migrations" && req.method === "GET") {
+        // 默认隐藏 rollback 安全备份批次（listBatches 契约）。
+        sendJson(res, 200, listBatches(backupRoot()));
+      } else if (u.pathname === "/api/migrations/rollback" && req.method === "POST") {
+        if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
+        const body = await readJson(req);
+        if (typeof body.id !== "string" || !body.id) {
+          sendJson(res, 400, { ok: false, error: "id must be a non-empty string" }); return;
+        }
+        const root = backupRoot();
+        try {
+          readBatch(body.id, root); // 未知 / 非法 id 一律 400，不触盘。
+        } catch (e) {
+          sendJson(res, 400, { ok: false, error: (e as Error).message }); return;
+        }
+        sendJson(res, 200, rollbackBatch(body.id, root));
       } else { res.writeHead(404); res.end("not found"); }
     } catch (e) { if (!res.headersSent) { res.writeHead(500); } res.end("internal error"); }
   });
