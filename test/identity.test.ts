@@ -55,6 +55,20 @@ test("codex auth.json 的 JWT 解出 email 与 account id", () => {
   assert.equal(info.email, "dev@example.com");
 });
 
+test("codex JWT 缺 email claim 时 label 回退为 accountId 且不挂 email 字段", () => {
+  const home = makeTempHome();
+  const token = makeJwt({ chatgpt_account_id: "acct-no-email" });
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".codex", "auth.json"), JSON.stringify({ tokens: { id_token: token } }));
+
+  const info = getCodexAuthIdentity(home);
+  assert.ok(info);
+  assert.equal(info.kind, "codex");
+  assert.equal(info.id, "acct-no-email");
+  assert.equal(info.label, "acct-no-email");
+  assert.equal(info.email, undefined);
+});
+
 test("凭据文件全缺时两个 getter 返回 null 且不抛异常", () => {
   const home = makeTempHome();
   assert.equal(getClaudeIdentity(home), null);
