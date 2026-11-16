@@ -140,9 +140,10 @@ export function startServer(port: number): http.Server {
           sendJson(res, 400, { ok: false, error: "userId must be a string when provided" }); return;
         }
         // MigrateOpts 只有单 agent 字段：按 agent 分组各跑一次 migrateSessions。
-        // 混合批次的合并语义：响应保持 MigrateResult 形状，batchId 取首个分组（按 target
-        // 首次出现顺序）的批次 id，results 按原 targets 顺序归并；磁盘上每组各留一份 manifest，
-        // GET /api/migrations 会分别列出。
+        // 混合批次的合并语义：响应保持 MigrateResult 形状并加法携带 batchIds——
+        // batchIds 按分组调用顺序收集磁盘上实际产生的全部批次 id；batchId 取首个
+        // （= batchIds[0]，单 agent 场景长度为 1，向后兼容）；results 按原 targets
+        // 顺序归并。GET /api/migrations 会把每个分组的 manifest 分别列出。
         const groups = new Map<string, string[]>();
         for (const t of targets) {
           const agent = agentByPath.get(t) as string;
@@ -152,7 +153,7 @@ export function startServer(port: number): http.Server {
         }
         const root = backupRoot();
         const merged = new Map<string, OpResult>();
-        let batchId = "";
+        const batchIds: string[] = [];
         for (const [agent, groupTargets] of groups) {
           const r = migrateSessions(groupTargets, {
             type: body.type,
@@ -163,10 +164,14 @@ export function startServer(port: number): http.Server {
             backupRoot: root,
             agent: agent as "claude" | "codex" | "openclaw",
           });
-          if (!batchId) batchId = r.batchId;
+          batchIds.push(r.batchId);
           for (const item of r.results) merged.set(item.path, item);
         }
-        const response: MigrateResult = { batchId, results: targets.map((t) => merged.get(t) as OpResult) };
+        const response: MigrateResult & { batchIds: string[] } = {
+          batchId: batchIds[0],
+          batchIds,
+          results: targets.map((t) => merged.get(t) as OpResult),
+        };
         sendJson(res, 200, response);
       } else if (u.pathname === "/api/migrations" && req.method === "GET") {
         // 默认隐藏 rollback 安全备份批次（listBatches 契约）。

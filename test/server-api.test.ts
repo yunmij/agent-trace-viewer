@@ -211,3 +211,58 @@ test("⑥ rollback 未知 id → 400", async () => {
     assert.equal(empty.status, 400);
   });
 });
+
+test("⑦ 混合 agent 批次：batchIds 收集全部分组 id，results 保序，两个批次均可查可回滚", async () => {
+  const root = path.join(tempHome, "fixtures-7");
+  fs.mkdirSync(root, { recursive: true });
+  // 额外输入源按正文检测 agent：claude 风格 user 记录 + codex 风格 session_meta。
+  const claudeFile = path.join(root, "claude-mix.jsonl");
+  const codexFile = path.join(root, "rollout-mix.jsonl");
+  const claudeOriginal = [{ type: "user", cwd: "/old/proj", message: { role: "user", content: "hi" } }];
+  const codexOriginal = [{ type: "session_meta", payload: { cwd: "/old/proj", runtime_workspace_roots: ["/old/proj"] } }];
+  fs.writeFileSync(claudeFile, claudeOriginal.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  fs.writeFileSync(codexFile, codexOriginal.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  addInput(root);
+  try {
+    await withServer(async (base) => {
+      const newValue = path.join(tempHome, "mix-new-proj");
+      const targets = [claudeFile, codexFile]; // 故意 claude 在前，验证分组后 results 仍按此序
+      const res = await postJson(base, "/api/migrate", { type: "project", value: newValue, targets });
+      assert.equal(res.status, 200);
+      const data = await res.json() as any;
+
+      // ① 两个 agent 分组 → 两个真实批次，batchId 与 batchIds[0] 一致。
+      assert.ok(Array.isArray(data.batchIds));
+      assert.equal(data.batchIds.length, 2);
+      assert.equal(data.batchId, data.batchIds[0]);
+
+      // ② results 顺序与请求 targets 原始顺序一致，且全部 done。
+      assert.deepEqual(data.results.map((r: any) => r.path), targets);
+      assert.ok(data.results.every((r: any) => r.status === "done"), JSON.stringify(data.results));
+
+      // claude 项发生移动，codex 项原地改写。
+      const claudeResult = data.results[0];
+      assert.equal(typeof claudeResult.movedTo, "string");
+      assert.ok(!fs.existsSync(claudeFile), "claude 原路径已移走");
+      assert.equal(readLines(codexFile)[0].payload.cwd, newValue);
+
+      // ③ 列表能发现两个批次，id 与响应 batchIds 完全对得上。
+      const batches = await (await fetch(base + "/api/migrations")).json() as any[];
+      const listedIds = batches.map((b) => b.id);
+      for (const id of data.batchIds) assert.ok(listedIds.includes(id), `批次 ${id} 应出现在列表中`);
+
+      // ④ 两个批次分别回滚成功：claude 文件挪回原路径，codex 内容字节语义还原。
+      for (const id of data.batchIds) {
+        const rb = await postJson(base, "/api/migrations/rollback", { id });
+        assert.equal(rb.status, 200);
+        const rbData = await rb.json() as any;
+        assert.ok(rbData.results.every((r: any) => r.status === "done"), JSON.stringify(rbData.results));
+      }
+      assert.ok(fs.existsSync(claudeFile), "claude 文件回滚后回到原路径");
+      assert.deepEqual(readLines(claudeFile), claudeOriginal);
+      assert.deepEqual(readLines(codexFile), codexOriginal);
+    });
+  } finally {
+    removeInput(root);
+  }
+});
