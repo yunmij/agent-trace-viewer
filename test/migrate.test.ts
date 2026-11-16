@@ -9,6 +9,9 @@ import {
   migrateSessions,
   rewriteJsonlAtomic,
   encodeClaudeProject,
+  listBatches,
+  readBatch,
+  rollbackBatch,
   type MigrateOpts,
 } from "../src/migrate.ts";
 
@@ -212,10 +215,184 @@ test("批次语义：单项失败不中止其余项，结果全部进 manifest",
   assert.deepEqual(statuses, ["done", "failed"]);
 });
 
-test("type=account 抛 not implemented", () => {
+// ---- Task 4：账号迁移、批次查询与漂移检测回滚 ----
+
+function accountOpts(sb: ReturnType<typeof sandbox>, partial: Partial<MigrateOpts> = {}): MigrateOpts {
+  return baseOpts({
+    agent: "codex",
+    value: "acct-B",
+    type: "account",
+    userId: "user-B",
+    allowedRoots: [sb.allowedRoot],
+    claudeRoot: sb.claudeRoot,
+    backupRoot: sb.backupRoot,
+    ...partial,
+  });
+}
+
+test("⑨ codex 账号迁移：仅首条 session_meta 的两个 creator 字段更新，内嵌 meta 保持旧 id", () => {
   const sb = sandbox();
-  const opts = baseOpts({ agent: "codex", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot, type: "account" });
-  assert.throws(() => migrateSessions([], opts), /not implemented/);
+  const src = path.join(sb.allowedRoot, "codex-account.jsonl");
+  writeJsonl(src, [
+    { type: "session_meta", payload: { cwd: "/old/proj", creator_account_id: "acct-A", creator_user_id: "user-A" } },
+    { type: "turn_context", payload: { cwd: "/old/proj" } },
+    { type: "session_meta", payload: { cwd: "/old/proj", creator_account_id: "acct-A", creator_user_id: "user-A" } },
+  ]);
+
+  const res = migrateSessions([src], accountOpts(sb));
+  assert.equal(res.results[0].status, "done", res.results[0].error);
+  assert.ok(fs.existsSync(src), "codex 账号迁移不挪文件");
+
+  const recs = readJsonl(src);
+  assert.equal(recs[0].payload.creator_account_id, "acct-B");
+  assert.equal(recs[0].payload.creator_user_id, "user-B");
+  assert.equal(recs[0].payload.cwd, "/old/proj", "cwd 等非归属字段不动");
+  assert.equal(recs[1].payload.cwd, "/old/proj");
+  assert.equal(recs[2].payload.creator_account_id, "acct-A", "内嵌祖先 meta 的 creator 保持旧值");
+  assert.equal(recs[2].payload.creator_user_id, "user-A");
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(sb.backupRoot, res.batchId, "manifest.json"), "utf8"));
+  assert.equal(manifest.type, "account");
+  assert.deepEqual(
+    manifest.ops[0].changes.map((c: any) => c.field).sort(),
+    ["payload.creator_account_id", "payload.creator_user_id"],
+  );
+});
+
+test("⑩ 账号迁移缺 userId：该项 failed 且文件字节不变", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "codex-account.jsonl");
+  writeJsonl(src, [
+    { type: "session_meta", payload: { creator_account_id: "acct-A", creator_user_id: "user-A" } },
+  ]);
+  const before = fs.readFileSync(src);
+
+  for (const bad of [undefined, ""]) {
+    const res = migrateSessions([src], accountOpts(sb, { userId: bad }));
+    assert.equal(res.results[0].status, "failed");
+    assert.match(res.results[0].error!, /userId/);
+    assert.deepEqual(fs.readFileSync(src), before, "缺 userId 时文件必须字节不变");
+  }
+});
+
+test("⑩b 非 codex agent 的 account 迁移：该项 failed 且文件不变", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "claude-account.jsonl");
+  writeJsonl(src, [{ type: "session_meta", payload: { creator_account_id: "acct-A" } }]);
+  const before = fs.readFileSync(src);
+
+  const res = migrateSessions([src], accountOpts(sb, { agent: "claude" }));
+  assert.equal(res.results[0].status, "failed");
+  assert.match(res.results[0].error!, /codex/);
+  assert.deepEqual(fs.readFileSync(src), before);
+});
+
+test("⑪ A→B→C 连续迁移后回滚第一批：漂移冲突整批中止，磁盘保持 C 状态", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "codex-account.jsonl");
+  writeJsonl(src, [
+    { type: "session_meta", payload: { creator_account_id: "acct-A", creator_user_id: "user-A" } },
+  ]);
+
+  const r1 = migrateSessions([src], accountOpts(sb, { value: "acct-B", userId: "user-B" }));
+  const r2 = migrateSessions([src], accountOpts(sb, { value: "acct-C", userId: "user-C" }));
+  assert.equal(r1.results[0].status, "done");
+  assert.equal(r2.results[0].status, "done");
+
+  const rb = rollbackBatch(r1.batchId, sb.backupRoot);
+  assert.equal(rb.batchId, r1.batchId, "中止时不产生新批次 id");
+  assert.ok(rb.results.length >= 1);
+  assert.ok(rb.results.every((r) => r.status === "failed"), "整批中止，无一项执行还原");
+  assert.ok(rb.results.some((r) => /drift/.test(r.error ?? "")), "冲突项带漂移 error");
+
+  const recs = readJsonl(src);
+  assert.equal(recs[0].payload.creator_account_id, "acct-C", "文件保持二次迁移后的 C 状态");
+  assert.equal(recs[0].payload.creator_user_id, "user-C");
+  const dirs = fs.readdirSync(sb.backupRoot);
+  assert.ok(!dirs.includes(`rollback-${r1.batchId}`), "漂移中止不得创建 rollback 安全备份目录");
+});
+
+test("⑫ 正常批次回滚（claude 移动场景）：路径与内容还原，rollback-* 安全备份存在", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "claude-session.jsonl");
+  const original = [
+    { cwd: "/old/proj", type: "summary" },
+    { cwd: "/old/proj", type: "user" },
+  ];
+  writeJsonl(src, original);
+  const opts = baseOpts({ agent: "claude", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+
+  const r1 = migrateSessions([src], opts);
+  const dest = path.join(sb.claudeRoot, encodeClaudeProject("/new/proj"), "claude-session.jsonl");
+  assert.equal(r1.results[0].status, "done");
+  assert.ok(fs.existsSync(dest) && !fs.existsSync(src));
+
+  const rb = rollbackBatch(r1.batchId, sb.backupRoot);
+  assert.equal(rb.results[0].status, "done", rb.results[0].error);
+  assert.ok(fs.existsSync(src), "文件挪回原路径");
+  assert.ok(!fs.existsSync(dest), "movedTo 路径文件已移除");
+  assert.deepEqual(readJsonl(src), original, "内容还原为迁移前状态");
+
+  const rollbackDir = path.join(sb.backupRoot, `rollback-${r1.batchId}`);
+  assert.ok(fs.existsSync(rollbackDir), "rollback-* 安全备份目录存在");
+  const rbManifest = JSON.parse(fs.readFileSync(path.join(rollbackDir, "manifest.json"), "utf8"));
+  assert.equal(rbManifest.type, "rollback");
+  assert.equal(rbManifest.rollbackOf, r1.batchId);
+  assert.equal(rbManifest.ops[0].status, "done");
+});
+
+test("⑫b 正常批次回滚（codex 原地改写场景）：内容字节级还原", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "codex-session.jsonl");
+  const original = [{ type: "session_meta", payload: { cwd: "/old/proj" } }];
+  writeJsonl(src, original);
+  const opts = baseOpts({ agent: "codex", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+
+  const r1 = migrateSessions([src], opts);
+  const manifest1 = JSON.parse(fs.readFileSync(path.join(sb.backupRoot, r1.batchId, "manifest.json"), "utf8"));
+  const backupFile = path.join(sb.backupRoot, r1.batchId, manifest1.ops[0].backup);
+  const originalBytes = fs.readFileSync(backupFile);
+
+  const rb = rollbackBatch(r1.batchId, sb.backupRoot);
+  assert.equal(rb.results[0].status, "done", rb.results[0].error);
+  assert.deepEqual(fs.readFileSync(src), originalBytes, "原地文件按备份字节级还原");
+});
+
+test("⑬ readBatch 路径穿越防护：../、分隔符、.. 与缺失 manifest 一律抛错", () => {
+  const sb = sandbox();
+  assert.throws(() => readBatch("../etc", sb.backupRoot), /invalid batch id/);
+  assert.throws(() => readBatch("a/b", sb.backupRoot), /invalid batch id/);
+  assert.throws(() => readBatch("a\\b", sb.backupRoot), /invalid batch id/);
+  assert.throws(() => readBatch("..", sb.backupRoot), /invalid batch id/);
+  assert.throws(() => readBatch("no-such-batch", sb.backupRoot), /not found|unreadable|invalid/i);
+});
+
+test("⑭ listBatches：按时间倒序、计数正确，无 manifest 的子目录跳过", () => {
+  const sb = sandbox();
+  const f1 = path.join(sb.allowedRoot, "s1.jsonl");
+  const f2 = path.join(sb.allowedRoot, "s2.jsonl");
+  writeJsonl(f1, [{ type: "session_meta", payload: { cwd: "/old/proj" } }]);
+  writeJsonl(f2, [{ type: "session_meta", payload: { cwd: "/old/proj" } }, { cwd: "/old/proj" }]);
+  const opts = baseOpts({ agent: "codex", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+
+  const r1 = migrateSessions([f1], opts);
+  const r2 = migrateSessions([f2, f1], opts);
+  // 噪音：无 manifest 的目录与普通文件，必须被跳过而不是抛错。
+  fs.mkdirSync(path.join(sb.backupRoot, "junk-dir"), { recursive: true });
+  fs.writeFileSync(path.join(sb.backupRoot, "junk-file"), "x");
+
+  const list = listBatches(sb.backupRoot);
+  assert.equal(list.length, 2);
+  assert.equal(list[0].id, r2.batchId, "最新批次排在最前");
+  assert.equal(list[1].id, r1.batchId);
+  const byId = new Map(list.map((b) => [b.id, b]));
+  assert.deepEqual(
+    { opCount: byId.get(r1.batchId)!.opCount, doneCount: byId.get(r1.batchId)!.doneCount, type: byId.get(r1.batchId)!.type },
+    { opCount: 1, doneCount: 1, type: "project" },
+  );
+  assert.equal(byId.get(r2.batchId)!.opCount, 2);
+  assert.equal(byId.get(r2.batchId)!.doneCount, 2);
+  assert.equal(typeof list[0].createdAt, "string");
 });
 
 test("rewriteJsonlAtomic：null 表示不改，无变更时不重写文件", () => {
