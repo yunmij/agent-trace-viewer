@@ -107,7 +107,7 @@ npm run demo        # generates fictional sessions in .demo-home/ and serves onl
 Agent transcripts often contain source code, file paths and occasionally secrets, so the defaults are strict:
 
 - **Local only.** The server binds to `127.0.0.1` and rejects requests whose `Host` header isn't a loopback name, which blocks DNS-rebinding attacks.
-- **Read-only by default.** Browsing never writes to your sessions: it only reads `.jsonl` files under the configured sources. The optional migration features are the only write operations, and they are limited to session `.jsonl` files. Every migration first copies the originals to `~/.agent-trace-viewer/backups`, and each batch can be rolled back after a sha256 drift check that refuses to restore modified files.
+- **Read-only by default.** Browsing never writes to your sessions: it only reads `.jsonl` files under the configured sources. The optional migration features are the only operations that modify your session files, and they touch nothing beyond those `.jsonl` files. Every migration first copies the originals to `~/.agent-trace-viewer/backups`, and each batch can be rolled back after a sha256 drift check that refuses to restore modified files.
 - **No cross-site changes.** Adding or removing sources, saving notes and running migrations require `POST` with `application/json`, so other websites can't trigger them.
 - **Offline.** No network requests, no analytics.
 
