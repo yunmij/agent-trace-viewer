@@ -41,12 +41,17 @@ export interface ManifestOp {
   postHash?: string;
   status: "done" | "failed";
   error: string | null;
+  // failed 项专用：执行失败后实体文件可能仍在的全部候选路径（含 claude 移动失败的 destGuess）。
+  // 回滚漂移检测据此判断 failed 项是否留下孤儿文件；done 项省略。
+  destCandidates?: string[] | null;
 }
+
+export type BatchType = "project" | "account" | "rollback";
 
 export interface Manifest {
   id: string;
-  // "project" | "account" 为迁移批次；"rollback" 为回滚前的安全备份批次（带 rollbackOf）。
-  type: string;
+  // project/account 为迁移批次；rollback 为回滚前的安全备份批次（带 rollbackOf），不可再触发回滚。
+  type: BatchType;
   createdAt: string;
   ops: ManifestOp[];
   rollbackOf?: string;
@@ -54,7 +59,9 @@ export interface Manifest {
 
 export interface BatchSummary {
   id: string;
-  type: string;
+  // rollback 类型是安全备份批次，不可再触发回滚（否则产生 rollback-rollback-* 嵌套）；
+  // listBatches 默认不返回该类型，仅在 includeRollbacks=true 时显式列出。
+  type: BatchType;
   createdAt: string;
   opCount: number;
   doneCount: number;
@@ -253,6 +260,15 @@ function atomicCopyFile(src: string, dest: string): void {
 // 单项执行回调：返回 movedTo 表示该文件被挪到新路径，undefined 表示原地改写。
 type ExecuteFn = (item: Prepared, changes: Change[]) => string | undefined;
 
+// 执行失败后实体文件可能仍在的全部候选路径。runBatch 的 catch 与回滚漂移检测共用同一套推导，
+// 避免两处各写一份导致漂移：claude 移动场景 link+unlink 已成功、后续改写失败时，实体只在 destGuess。
+function postFailureCandidates(opts: MigrateOpts, item: Prepared): string[] {
+  const destGuess = opts.agent === "claude"
+    ? path.join(opts.claudeRoot, encodeClaudeProject(opts.value), path.basename(item.real))
+    : item.real;
+  return [...new Set([item.real, destGuess, item.target])];
+}
+
 // 批次通用骨架：先逐项校验+备份，再逐项执行，单项失败不拖垮批次，最后落 manifest。
 function runBatch(targets: string[], opts: MigrateOpts, execute: ExecuteFn): MigrateResult {
   const batchId = timestampId();
@@ -276,9 +292,10 @@ function runBatch(targets: string[], opts: MigrateOpts, execute: ExecuteFn): Mig
     const changes: Change[] = [];
     if (!item.ok) {
       // I1：文件仍在磁盘上的 failed 项（越界 / 非 .jsonl / 备份异常等）回填 postHash。
-      const postHash = tryPostHash(item.real, item.target);
+      const candidates = [item.real, item.target];
+      const postHash = tryPostHash(...candidates);
       results.push({ path: item.target, status: "failed", error: item.error, changes, ...(postHash ? { postHash } : {}) });
-      manifestOps.push({ agent: opts.agent, path: item.target, movedTo: null, changes, backup: item.backupRel, ...(postHash ? { postHash } : {}), status: "failed", error: item.error ?? null });
+      manifestOps.push({ agent: opts.agent, path: item.target, movedTo: null, changes, backup: item.backupRel, ...(postHash ? { postHash } : {}), status: "failed", error: item.error ?? null, destCandidates: candidates });
       continue;
     }
     try {
@@ -290,13 +307,12 @@ function runBatch(targets: string[], opts: MigrateOpts, execute: ExecuteFn): Mig
     } catch (e) {
       const error = (e as Error).message;
       // I1：执行期 failed 同样回填操作后文件的 sha256。源文件仍在时以源为准；
-      // 源已移除（link+unlink 成功后改写失败）才取 dest。
-      const destGuess = opts.agent === "claude"
-        ? path.join(opts.claudeRoot, encodeClaudeProject(opts.value), path.basename(item.real))
-        : item.real;
-      const postHash = tryPostHash(item.real, destGuess, item.target);
+      // 源已移除（link+unlink 成功后改写失败）才取 dest。候选路径同时落 manifest，
+      // 供回滚漂移检测判断 failed 项是否留下无 ledger 记录的孤儿文件。
+      const candidates = postFailureCandidates(opts, item);
+      const postHash = tryPostHash(...candidates);
       results.push({ path: item.target, status: "failed", error, changes, ...(postHash ? { postHash } : {}) });
-      manifestOps.push({ agent: opts.agent, path: item.target, movedTo: null, changes, backup: item.backupRel, ...(postHash ? { postHash } : {}), status: "failed", error });
+      manifestOps.push({ agent: opts.agent, path: item.target, movedTo: null, changes, backup: item.backupRel, ...(postHash ? { postHash } : {}), status: "failed", error, destCandidates: candidates });
     }
   }
 
@@ -404,9 +420,11 @@ export function readBatch(batchId: string, backupRoot: string): Manifest {
   }
 }
 
-// 列 backupRoot 下全部带合法 manifest 的子目录（含 rollback-* 安全备份），按时间倒序；
+// 列 backupRoot 下全部带合法 manifest 的子目录，按时间倒序；
 // 无 manifest / 不可读的子目录与普通文件一律跳过，不抛错。
-export function listBatches(backupRoot: string): BatchSummary[] {
+// 默认只返回 project/account 迁移批次；rollback 安全备份批次（不可再触发回滚）
+// 仅在显式传 includeRollbacks=true 时列出，避免 UI 对其再次回滚产生 rollback-rollback-* 嵌套。
+export function listBatches(backupRoot: string, includeRollbacks = false): BatchSummary[] {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(backupRoot, { withFileTypes: true });
@@ -422,6 +440,7 @@ export function listBatches(backupRoot: string): BatchSummary[] {
     } catch {
       continue;
     }
+    if (manifest.type === "rollback" && !includeRollbacks) continue;
     summaries.push({
       id: manifest.id,
       type: manifest.type,
@@ -437,12 +456,33 @@ export function listBatches(backupRoot: string): BatchSummary[] {
 
 // ---- 漂移检测回滚 ----
 
+// ledger 记录过的该 op 全部实体候选位置：movedTo（done 移动项）、原 path、failed 项落盘的 destCandidates。
+function opLocationCandidates(op: ManifestOp): string[] {
+  const ordered: string[] = [];
+  if (op.movedTo) ordered.push(op.movedTo);
+  ordered.push(op.path);
+  for (const c of op.destCandidates ?? []) ordered.push(c);
+  return [...new Set(ordered)];
+}
+
+function isExistingFile(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function rollbackBatch(batchId: string, backupRoot: string): MigrateResult {
   const manifest = readBatch(batchId, backupRoot);
-  // 控制器裁定：failed op 只留记录，回滚/漂移逻辑只处理 status:"done" 项。
+  // 控制器裁定：failed op 不参与还原，但必须参与漂移守卫——
+  // ledger 点名的边角（claude link+unlink 成功后改写失败）会让原 path 消失、实体只在 destGuess，
+  // 若所有 ledger 位置都找不到实体，按漂移冲突整批中止，绝不静默吞掉孤儿/丢失项。
   const doneOps = manifest.ops.filter((op) => op.status === "done");
+  const failedOps = manifest.ops.filter((op) => op.status === "failed");
 
-  // ① 漂移检测：当前文件（有 movedTo 取 movedTo，否则 path）sha256 对 postHash。
+  // ① 漂移检测：done 项算当前文件（有 movedTo 取 movedTo，否则 path）sha256 对 postHash；
+  // failed 项只做「实体是否仍在任一 ledger 位置」的存在性守卫。
   // 任一不匹配或 backing file 缺失 → 整批中止，不做任何还原，也不创建 rollback 目录。
   const conflicts = new Map<ManifestOp, string>();
   for (const op of doneOps) {
@@ -463,9 +503,16 @@ export function rollbackBatch(batchId: string, backupRoot: string): MigrateResul
       conflicts.set(op, `drift conflict: sha256 mismatch (current=${hash}, postHash=${op.postHash ?? ""}): ${current}`);
     }
   }
+  for (const op of failedOps) {
+    const candidates = opLocationCandidates(op);
+    if (!candidates.some(isExistingFile)) {
+      conflicts.set(op, `drift conflict: failed op has no backing file at any ledger location: ${candidates.join(", ")}`);
+    }
+  }
 
   if (conflicts.size > 0) {
-    const results: OpResult[] = doneOps.map((op) => {
+    // 中止结果覆盖 manifest 全部 op：冲突项带具体 error，其余项说明整批中止、未执行任何还原。
+    const results: OpResult[] = manifest.ops.map((op) => {
       const conflict = conflicts.get(op);
       return conflict
         ? { path: op.path, status: "failed", error: conflict, changes: [] }

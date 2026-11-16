@@ -504,3 +504,107 @@ test("I3：预置同名 dest 时 link 不变量兜底，源文件与预置文件
   assert.deepEqual(fs.readFileSync(src), srcBefore);
   assert.equal(res.results[0].postHash, sha256(src), "failed 项同样回填 postHash");
 });
+
+// ---- fix round 1：C1 failed 移动项不得被回滚静默吞掉 ----
+
+test("C1a：真实 failed claude 移动项的 manifest 落 destCandidates，回滚不把它当漂移冲突", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "claude-session.jsonl");
+  const original = [{ cwd: "/old/proj" }, { cwd: "/old/proj" }];
+  writeJsonl(src, original);
+  const dest = path.join(sb.claudeRoot, encodeClaudeProject("/new/proj"), "claude-session.jsonl");
+  fs.chmodSync(sb.allowedRoot, 0o555); // link 成功、unlink EACCES → failed 且两份副本都在
+  const opts = baseOpts({ agent: "claude", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+  try {
+    const res = migrateSessions([src], opts);
+    assert.equal(res.results[0].status, "failed");
+    const manifest = JSON.parse(fs.readFileSync(path.join(sb.backupRoot, res.batchId, "manifest.json"), "utf8"));
+    const op = manifest.ops[0];
+    assert.equal(op.status, "failed");
+    assert.ok(Array.isArray(op.destCandidates) && op.destCandidates.includes(dest), "destCandidates 必须记录 destGuess");
+    assert.ok(op.destCandidates.includes(src));
+
+    // 实体仍在 ledger 位置上 → 不构成漂移冲突；批次无 done 项时回滚产出空安全备份而非中止。
+    const rb = rollbackBatch(res.batchId, sb.backupRoot);
+    assert.ok(rb.results.every((r) => r.status !== "failed" || !/drift/.test(r.error ?? "")), "存在实体的 failed 项不得报漂移");
+    assert.ok(fs.existsSync(path.join(sb.backupRoot, `rollback-${res.batchId}`, "manifest.json")));
+  } finally {
+    fs.chmodSync(sb.allowedRoot, 0o755);
+  }
+});
+
+test("C1b：link+unlink 成功后改写失败的孤儿形态——所有 ledger 位置无实体时回滚整批中止", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "claude-session.jsonl");
+  writeJsonl(src, [{ cwd: "/old/proj" }]);
+  const opts = baseOpts({ agent: "claude", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+
+  // 先跑一次成功批次拿到真实 dest 路径与 manifest，再改写成 ledger 边角形态：
+  // status=failed、movedTo=null、原 path 已不存在（link+unlink 成功）、destCandidates 记录 destGuess。
+  const r1 = migrateSessions([src], opts);
+  const manifestPath = path.join(sb.backupRoot, r1.batchId, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const dest = manifest.ops[0].movedTo;
+  assert.ok(fs.existsSync(dest) && !fs.existsSync(src));
+  manifest.ops[0].status = "failed";
+  manifest.ops[0].movedTo = null;
+  manifest.ops[0].destCandidates = [src, dest];
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  // 子场景 1：孤儿文件仍在 destGuess → 不报缺失冲突。
+  const rb1 = rollbackBatch(r1.batchId, sb.backupRoot);
+  assert.ok(!rb1.results.some((r) => /drift/.test(r.error ?? "")));
+  fs.rmSync(path.join(sb.backupRoot, `rollback-${r1.batchId}`), { recursive: true, force: true });
+
+  // 子场景 2：孤儿也丢失（所有 ledger 位置均无实体）→ 整批中止、零触盘、无 rollback 目录。
+  fs.unlinkSync(dest);
+  const rb2 = rollbackBatch(r1.batchId, sb.backupRoot);
+  assert.ok(rb2.results.length >= 1);
+  assert.ok(rb2.results.every((r) => r.status === "failed"));
+  assert.ok(rb2.results.some((r) => /drift conflict: failed op has no backing file/.test(r.error ?? "")), "冲突项必须带 failed 项无实体的漂移 error");
+  assert.ok(!fs.existsSync(src) && !fs.existsSync(dest), "磁盘保持中止前状态");
+  assert.ok(!fs.existsSync(path.join(sb.backupRoot, `rollback-${r1.batchId}`)), "中止不得创建 rollback 安全备份");
+});
+
+// ---- fix round 1：I1 listBatches 契约固化 ----
+
+test("I1：listBatches 默认隐藏 rollback 批次，includeRollbacks=true 才列出且类型联合正确", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "codex-session.jsonl");
+  writeJsonl(src, [{ type: "session_meta", payload: { cwd: "/old/proj" } }]);
+  const opts = baseOpts({ agent: "codex", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+  const r1 = migrateSessions([src], opts);
+  rollbackBatch(r1.batchId, sb.backupRoot);
+
+  const defaultList = listBatches(sb.backupRoot);
+  assert.deepEqual(defaultList.map((b) => b.id), [r1.batchId], "主列表不返回 rollback 批次");
+  assert.equal(defaultList[0].type, "project");
+
+  const all = listBatches(sb.backupRoot, true);
+  assert.equal(all.length, 2);
+  const rollbackEntry = all.find((b) => b.type === "rollback");
+  assert.ok(rollbackEntry, "显式包含时 rollback 批次可见且 type 可判别");
+  assert.equal(rollbackEntry!.id, `rollback-${r1.batchId}`);
+});
+
+// ---- fix round 1：Minor ③ undo-of-undo 实测 ----
+
+test("Minor③：对 rollback 安全备份批次再回滚，文件恢复为迁移后状态（undo-of-undo）", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "codex-session.jsonl");
+  writeJsonl(src, [{ type: "session_meta", payload: { cwd: "/old/proj" } }]);
+  const opts = baseOpts({ agent: "codex", value: "/new/proj", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+
+  const r1 = migrateSessions([src], opts);
+  assert.equal(readJsonl(src)[0].payload.cwd, "/new/proj");
+  const rb1 = rollbackBatch(r1.batchId, sb.backupRoot);
+  assert.equal(readJsonl(src)[0].payload.cwd, "/old/proj", "第一次回滚还原");
+
+  const rb2 = rollbackBatch(rb1.batchId, sb.backupRoot);
+  assert.equal(rb2.results[0].status, "done", rb2.results[0].error);
+  assert.equal(readJsonl(src)[0].payload.cwd, "/new/proj", "undo-of-undo 恢复迁移后状态");
+  const nestedDir = path.join(sb.backupRoot, `rollback-${rb1.batchId}`);
+  const nestedManifest = JSON.parse(fs.readFileSync(path.join(nestedDir, "manifest.json"), "utf8"));
+  assert.equal(nestedManifest.type, "rollback");
+  assert.equal(nestedManifest.rollbackOf, rb1.batchId);
+});
