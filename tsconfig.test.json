@@ -1,0 +1,5 @@
+{
+  "//": "类型检查专用配置：继承构建配置的全部 compilerOptions，仅把 test/ 纳入编译范围。noEmit 下不会产出 dist/test；发布构建仍用 tsconfig.json（只含 bin/src）。",
+  "extends": "./tsconfig.json",
+  "include": ["bin", "src", "test"]
+}

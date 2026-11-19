@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Account labels on session rows and project / account filtering. Codex sessions show per-session account IDs mapped to the signed-in email or a custom note; Claude shows one shared machine identity; OpenClaw and Hermes have no account concept.
+- Model display and filtering: each session row shows its primary model (first real assistant model; `<synthetic>` placeholders skipped), with a model filter dropdown; the trace header shows the session model and every assistant card shows the model that produced it, so mid-session model switches stay visible.
+- Metadata scanning is record-based with a per-line size cap, keeping metadata correct on files whose first record is multi-MB (e.g. embedded Codex session_meta), while remaining memory-bounded on multi-GB files.
+- Batch project migration for Claude Code, Codex and OpenClaw, plus account migration for Codex sessions. Claude account migration and Hermes (SQLite) remain unsupported.
+- Automatic per-file backups under `~/.agent-trace-viewer/backups` and batch rollback with sha256 drift detection; rollback aborts without touching files when a session has changed since the migration.
+- New HTTP endpoints: `GET /api/identity`, `POST /api/identity/notes`, `POST /api/migrate`, `GET /api/migrations` (`?withOps=1&rollbacks=1`) and `POST /api/migrations/rollback`. Migration and rollback responses are projected to a public allowlist; internal ledger fields (`postHash`, `backup`, `destCandidates`) never leave the server.
+- Security wording clarified: the tool is read-only by default; migration writes are limited to session `.jsonl` files, are backed up automatically and are rollbackable.
+- Codex identity now resolves the account ID from namespaced JWT claims (`https://api.openai.com/auth`) and falls back to `tokens.account_id`, fixing email labels on rotated auth tokens.
+- Chunked scanning, hashing and JSONL rewriting: multi-GB session files (over the V8 ~512 MB string limit) now get correct metadata, line counts and migration support without loading the whole file; the full trace view is explicitly capped at 400 MB with a clear error.
+- `npm run demo` now includes two-account Codex fixtures plus demo auth, credentials and account-note files.
+
 ## 1.0.0
 
 First public release.

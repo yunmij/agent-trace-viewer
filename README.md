@@ -52,10 +52,13 @@ Requires **Node.js 18+** (Hermes sessions need Node 22.5+ for the built-in SQLit
 | 🔎 **Filter & search** | Agent pills with live counts, per-source filter, and multi-word search across title, session id, project and path. Optional auto-refresh while an agent is running. |
 | 🧵 **Readable traces** | User / assistant / tool / system cards you can collapse one by one. Thinking, tool calls and their results (paired by id), errors, token usage and hook / context injections are all labelled. Low-signal system noise is hidden by default. |
 | 🎯 **Find in session** | Highlights every match in a long trace and jumps between them with Enter / Shift+Enter — collapsed cards open automatically. |
+| 🪪 **Accounts & projects** | Every row shows its project folder and, where the agent records one, the account that ran the session. Codex sessions carry per-session account IDs (mapped to your signed-in email or a custom label); Claude shows one shared machine identity; OpenClaw and Hermes have no account concept. Filter the list by project or account. |
+| 🤖 **Model display** | Each row carries the session's primary model with a model filter dropdown; `<synthetic>` placeholder records are skipped. The trace view shows the model on every assistant card, so mid-session model switches are visible per turn. |
+| 🚚 **Batch migration with rollback** | Move selected sessions to another project folder, or reassign Codex sessions to another account, in one batch. Every target `.jsonl` is backed up automatically under `~/.agent-trace-viewer/backups` before changes, and a rollback restores the batch after a sha256 drift check. Claude account migration and Hermes (SQLite) are not supported. |
 | ⌨️ **Keyboard friendly** | `/` focuses search, `j` / `k` (or ↑ / ↓) move between sessions. |
 | 🌗 **Light & dark** | Follows your system theme; toggle any time. |
 | 📁 **Any JSONL** | Point it at extra folders or single files. The format (Claude / Codex / OpenClaw) is detected from the content, not the path. |
-| 🪶 **Tiny** | Zero runtime dependencies, ~40 KB package, read-only. |
+| 🪶 **Tiny** | Zero runtime dependencies, ~40 KB package, read-only by default. |
 
 <img src="https://raw.githubusercontent.com/yunmij/agent-trace-viewer/main/docs/screenshot-dark.png" alt="Dark theme with in-session search and a failed tool call" width="900">
 
@@ -63,10 +66,10 @@ Requires **Node.js 18+** (Hermes sessions need Node 22.5+ for the built-in SQLit
 
 | Agent | Default location | Notes |
 |---|---|---|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/**/*.jsonl` | thinking, tool use/results, hook & attachment injections, usage |
-| [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/**/rollout-*.jsonl` | reasoning summaries (encrypted reasoning is not visible), function calls, token totals |
-| [OpenClaw](https://github.com/openclaw/openclaw) | `~/.openclaw/agents/**/*.jsonl` | plain session logs and trajectory snapshots |
-| Hermes | `~/.hermes/state.db` | read from SQLite; includes compacted history and session totals |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/projects/**/*.jsonl` | thinking, tool use/results, hook & attachment injections, usage. One shared machine identity for every session; project migration supported, **account migration not supported** |
+| [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/**/rollout-*.jsonl` | reasoning summaries (encrypted reasoning is not visible), function calls, token totals. Per-session account IDs mapped to the signed-in email or a custom label; both project and account migration supported |
+| [OpenClaw](https://github.com/openclaw/openclaw) | `~/.openclaw/agents/**/*.jsonl` | plain session logs and trajectory snapshots. No account concept; project migration supported |
+| Hermes | `~/.hermes/state.db` | read from SQLite; includes compacted history and session totals. No account concept; **read-only, not migratable** |
 
 Missing a format you use? [Open an issue](https://github.com/yunmij/agent-trace-viewer/issues) with a (redacted) sample.
 
@@ -105,11 +108,17 @@ npm run demo        # generates fictional sessions in .demo-home/ and serves onl
 Agent transcripts often contain source code, file paths and occasionally secrets, so the defaults are strict:
 
 - **Local only.** The server binds to `127.0.0.1` and rejects requests whose `Host` header isn't a loopback name, which blocks DNS-rebinding attacks.
-- **Read-only.** It never writes to your sessions and only reads `.jsonl` files under the configured sources.
-- **No cross-site changes.** Adding or removing sources requires `POST` with `application/json`, so other websites can't trigger it.
+- **Read-only by default.** Browsing never writes to your sessions: it only reads `.jsonl` files under the configured sources. The optional migration features are the only operations that modify your session files, and they touch nothing beyond those `.jsonl` files. Every migration first copies the originals to `~/.agent-trace-viewer/backups`, and each batch can be rolled back after a sha256 drift check that refuses to restore modified files.
+- **No cross-site changes.** Adding or removing sources, saving notes and running migrations require `POST` with `application/json`, so other websites can't trigger them.
 - **Offline.** No network requests, no analytics.
 
 `--host 0.0.0.0` makes **every local session readable from your network**. Only use it on networks you trust.
+
+## Known limitations
+
+- **OpenClaw sibling snapshots.** Migration only rewrites the plain session log. OpenClaw `*.trajectory.jsonl` snapshot files next to it are never modified, so they may still record the old cwd after a project migration.
+- **Symlinked session files.** If a session file is reached through a symlink, every operation (including Claude project migration, which moves the file) acts on the realpath target; moving that target leaves the original symlink dangling.
+- **Very large session files.** Listing, metadata (title / cwd / account), line counts and migration use chunked reads and handle multi-GB JSONL files. The full trace view still needs to parse the whole file and is capped at 400 MB — larger sessions show an explicit error instead, while everything else keeps working.
 
 ## HTTP API
 
@@ -119,6 +128,11 @@ Agent transcripts often contain source code, file paths and occasionally secrets
 | `GET /api/render?path=<path>` | Structured trace for one session |
 | `GET /api/inputs` | List input sources |
 | `POST /api/inputs` with `{"add": "<path>"}` or `{"remove": "<path>"}` | Add / remove an extra source |
+| `GET /api/identity` | Local Claude / Codex identity and saved account labels |
+| `POST /api/identity/notes` with `{"accountId": "<id>", "label": "<text>"}` | Save a custom label for a Codex account |
+| `POST /api/migrate` with `{"type": "project"\|"account", "value": "<path|accountId>", "userId": "<id>", "targets": ["<path>", ...]}` | Batch project or account migration; automatic backup per target |
+| `GET /api/migrations?withOps=1&rollbacks=1` | List migration batches, newest first; `withOps=1` includes per-op details, `rollbacks=1` also lists rollback safety batches |
+| `POST /api/migrations/rollback` with `{"id": "<batchId>"}` | Roll back a batch after a sha256 drift check |
 | `GET /session_trace.html?path=<path>` | Full-page view of a single trace |
 
 ## Development

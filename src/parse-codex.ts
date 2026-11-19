@@ -70,5 +70,7 @@ export function renderCodex(real: string, text: string): RenderResult {
     if (lastAsst) lastAsst.usage = lastUsage;
   }
   const sm = structMetaFromRecords(records.slice(0, META_RECORDS));
-  return { path: real, cwd: sm.cwd, sessionId, title: userTitle || title, count: events.length, events };
+  // 账户 id 随解析结果带出（数据已在 StructMeta 流程里解析，无额外文件 IO）；
+  // label 不在此贴——render 层统一按 auth/备注/兜底三分支处理，保证备注更新即时生效。
+  return { path: real, cwd: sm.cwd, sessionId, title: userTitle || title, count: events.length, events, ...(sm.accountId ? { accountId: sm.accountId } : {}) };
 }

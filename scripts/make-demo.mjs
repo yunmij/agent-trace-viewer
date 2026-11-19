@@ -104,11 +104,14 @@ write(".claude/projects/-Users-demo-notes/c9a8b7d6-1e2f-4a3b-9c8d-7e6f5a4b3c2d.j
   ]), 60 * 26);
 
 // ---------- Codex ----------
-function codex(id, cwd, minAgo, prompt, items) {
+// 两个会话挂不同账号：第一个与本机（demo HOME）登录态一致 → 邮箱标签；第二个走备注/兜底标签。
+const CODEX_AUTH_ID = "43922f38-1111-2222-3333-444444444444";
+const CODEX_OTHER_ID = "aaaaaaaa-1234-5678-9abc-defdefdefdef";
+function codex(id, cwd, minAgo, prompt, items, accountId, userId) {
   let n = 0;
   const ts = () => iso(minAgo + 20 - n++ * 0.5);
   return [
-    { type: "session_meta", timestamp: ts(), payload: { id, cwd, cli_version: "0.40.0", base_instructions: { text: "You are Codex, a coding agent running in the user's terminal." } } },
+    { type: "session_meta", timestamp: ts(), payload: { id, cwd, cli_version: "0.40.0", base_instructions: { text: "You are Codex, a coding agent running in the user's terminal." }, creator_account_id: accountId, creator_user_id: userId } },
     { type: "event_msg", timestamp: ts(), payload: { type: "user_message", message: prompt } },
     { type: "response_item", timestamp: ts(), payload: { type: "message", role: "user", content: [{ type: "input_text", text: prompt }] } },
     ...items.map((p) => ({ type: "response_item", timestamp: ts(), payload: p })),
@@ -124,14 +127,14 @@ write(".codex/sessions/2026/10/26/rollout-2026-10-26T09-12-40-0199a1b2-c3d4-7e5f
     { type: "function_call", call_id: "call_2", name: "apply_patch", arguments: JSON.stringify({ input: "*** Begin Patch\n*** Update File: src/cli.ts\n-import yargs from 'yargs';\n+import { parseArgs } from 'node:util';\n*** End Patch" }) },
     { type: "function_call_output", call_id: "call_2", output: "Success. Updated the following files:\nM src/cli.ts" },
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "Migrated `src/cli.ts` to `node:util` `parseArgs`; removed the `yargs` dependency. All 14 CLI tests pass." }] },
-  ]), 40);
+  ], CODEX_AUTH_ID, "user-demo-1"), 40);
 write(".codex/sessions/2026/10/25/rollout-2026-10-25T16-03-11-0199a0f1-aaaa-7bbb-8ccc-dddd0000eeee.jsonl", codex(
   "0199a0f1-aaaa-7bbb-8ccc-dddd0000eeee", "/Users/demo/code/weather-app", 60 * 20,
   "Write unit tests for the temperature unit conversion helpers.", [
     { type: "function_call", call_id: "c1", name: "shell", arguments: JSON.stringify({ command: ["pnpm", "test", "units"] }) },
     { type: "function_call_output", call_id: "c1", output: "Tests: 8 passed, 8 total" },
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "Added 8 tests covering C↔F↔K conversions and rounding edge cases." }] },
-  ]), 60 * 20);
+  ], CODEX_OTHER_ID, "user-demo-2"), 60 * 20);
 
 // ---------- OpenClaw ----------
 write(".openclaw/agents/main/sessions/5e4d3c2b-1a09-4f8e-b7d6-c5b4a3928170.jsonl", (() => {
@@ -147,3 +150,28 @@ write(".openclaw/agents/main/sessions/5e4d3c2b-1a09-4f8e-b7d6-c5b4a3928170.jsonl
 })(), 60 * 3);
 
 console.log("demo sessions written to " + root);
+
+// ---------- 账户身份 fixture（Task 6：账户徽章/筛选/备注/迁移演示）----------
+// 结构合法但不验签的 JWT，仅 payload 会被 identity.ts 解码。
+function makeJwt(payload) {
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  return `${b64({ alg: "RS256", typ: "JWT" })}.${b64(payload)}.sig`;
+}
+fs.mkdirSync(path.join(root, ".codex"), { recursive: true });
+fs.writeFileSync(
+  path.join(root, ".codex", "auth.json"),
+  JSON.stringify({ tokens: { id_token: makeJwt({ email: "demo@example.com", chatgpt_account_id: CODEX_AUTH_ID }) } }),
+);
+fs.mkdirSync(path.join(root, ".claude"), { recursive: true });
+fs.writeFileSync(
+  path.join(root, ".claude", ".credentials.json"),
+  JSON.stringify({ claudeAiOauth: { subscriptionType: "team" } }),
+);
+fs.writeFileSync(path.join(root, ".claude.json"), JSON.stringify({ userID: "demo0123456789abcd" }));
+// 第二个 codex 账号预置备注，备注的新增/修改流程仍可在 UI 上手动验证。
+fs.mkdirSync(path.join(root, ".agent-trace-viewer"), { recursive: true });
+fs.writeFileSync(
+  path.join(root, ".agent-trace-viewer", "accounts.json"),
+  JSON.stringify({ codex: { [CODEX_OTHER_ID]: "团队共享号" } }, null, 2) + "\n",
+);
+console.log("demo identity fixtures written to " + root);

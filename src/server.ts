@@ -2,11 +2,37 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { HOST, DEFAULT_ROOTS, HERMES_DB, extraInputs, addInput, removeInput, readVersion } from "./config.ts";
+import { HOST, DEFAULT_ROOTS, HERMES_DB, extraInputs, addInput, removeInput, readVersion, allInputs, CLAUDE_ROOT } from "./config.ts";
 import { scanSessions } from "./scan.ts";
 import { renderTranscript } from "./render.ts";
 import { LIST_PAGE, tracePage } from "./pages.ts";
+import { getClaudeIdentity, getCodexAuthIdentity, readAccountNotes, saveAccountNote } from "./identity.ts";
+import { migrateSessions, listBatches, readBatch, rollbackBatch, type MigrateResult, type OpResult } from "./migrate.ts";
+
+// 迁移批次备份根：~/.agent-trace-viewer/backups（控制器裁定）。请求时取 homedir，
+// 以便测试在导入模块前改写 HOME 后仍落到临时目录。
+function backupRoot(): string {
+  return path.join(os.homedir(), ".agent-trace-viewer", "backups");
+}
+
+const MIGRATE_AGENTS = new Set(["claude", "codex", "openclaw"]);
+
+// HTTP 出参白名单投影：OpResult 里的 postHash（以及 manifest 层才有的 backup /
+// destCandidates，防御性一并排除）属于内部账本字段，不得随迁移/回滚响应离开服务边界。
+// 只保留 UI 需要的 path / status / error / movedTo / changes，migrate.ts 内部与磁盘
+// manifest 的结构不受影响。
+const OP_RESULT_PUBLIC_KEYS = ["path", "status", "error", "movedTo", "changes"] as const;
+function projectOpResult(op: OpResult): Record<string, unknown> {
+  const raw = op as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const k of OP_RESULT_PUBLIC_KEYS) {
+    const v = raw[k];
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
 
 const WEB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
 const STATIC_TYPES: Record<string, string> = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
@@ -54,6 +80,11 @@ function sendJson(res: http.ServerResponse, status: number, data: unknown): void
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" }); res.end(JSON.stringify(data));
 }
 
+// POST 统一只收 application/json（与 /api/inputs 同一纪律）；不合规直接 415。
+function jsonContentType(req: http.IncomingMessage): boolean {
+  return String(req.headers["content-type"] ?? "").startsWith("application/json");
+}
+
 export function startServer(port: number): http.Server {
   const server = http.createServer(async (req, res) => {
     if (!hostAllowed(req)) { res.writeHead(403); res.end("forbidden host"); return; }
@@ -76,12 +107,107 @@ export function startServer(port: number): http.Server {
         // 读用 GET；增删只走 POST + application/json（跨站请求需 CORS 预检，本服务不放行）。
         let result: { ok: boolean; error?: string } = { ok: true };
         if (req.method === "POST") {
-          if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
+          if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
           const body = await readJson(req);
           if (typeof body.add === "string" && body.add) result = addInput(body.add);
           if (typeof body.remove === "string" && body.remove) removeInput(body.remove);
         }
         sendJson(res, result.ok ? 200 : 400, { ...result, defaults: DEFAULT_ROOTS, extra: extraInputs });
+      } else if (u.pathname === "/api/identity" && req.method === "GET") {
+        sendJson(res, 200, {
+          claude: getClaudeIdentity(),
+          codex: getCodexAuthIdentity(),
+          notes: readAccountNotes(),
+        });
+      } else if (u.pathname === "/api/identity/notes" && req.method === "POST") {
+        if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
+        const body = await readJson(req);
+        if (typeof body.accountId !== "string" || !body.accountId || typeof body.label !== "string" || !body.label) {
+          sendJson(res, 400, { ok: false, error: "accountId and label must be non-empty strings" }); return;
+        }
+        saveAccountNote(body.accountId, body.label);
+        sendJson(res, 200, { ok: true });
+      } else if (u.pathname === "/api/migrate" && req.method === "POST") {
+        if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
+        const body = await readJson(req);
+        // 校验顺序（控制器裁定）：targets 非空数组 → 单次扫描建 path→agent 映射 →
+        // 查不到 agent 400 → hermes 合成引用 400 → project value 必须绝对路径 400。
+        if (!Array.isArray(body.targets) || body.targets.length === 0
+          || !body.targets.every((t) => typeof t === "string")) {
+          sendJson(res, 400, { ok: false, error: "targets must be a non-empty string array" }); return;
+        }
+        const targets = body.targets as string[];
+        const agentByPath = new Map<string, string>(scanSessions().map((r) => [r.path, r.agent]));
+        for (const t of targets) {
+          if (!agentByPath.has(t)) { sendJson(res, 400, { ok: false, error: `unknown agent for target: ${t}` }); return; }
+          if (t.includes("::")) { sendJson(res, 400, { ok: false, error: `hermes synthetic ref is not migratable: ${t}` }); return; }
+        }
+        if (body.type !== "project" && body.type !== "account") {
+          sendJson(res, 400, { ok: false, error: "type must be 'project' or 'account'" }); return;
+        }
+        if (typeof body.value !== "string" || !body.value) {
+          sendJson(res, 400, { ok: false, error: "value must be a non-empty string" }); return;
+        }
+        if (body.type === "project" && !path.isAbsolute(body.value)) {
+          sendJson(res, 400, { ok: false, error: "project migration value must be an absolute path" }); return;
+        }
+        if (body.userId !== undefined && typeof body.userId !== "string") {
+          sendJson(res, 400, { ok: false, error: "userId must be a string when provided" }); return;
+        }
+        // MigrateOpts 只有单 agent 字段：按 agent 分组各跑一次 migrateSessions。
+        // 混合批次的合并语义：响应保持 MigrateResult 形状并加法携带 batchIds——
+        // batchIds 按分组调用顺序收集磁盘上实际产生的全部批次 id；batchId 取首个
+        // （= batchIds[0]，单 agent 场景长度为 1，向后兼容）；results 按原 targets
+        // 顺序归并。GET /api/migrations 会把每个分组的 manifest 分别列出。
+        const groups = new Map<string, string[]>();
+        for (const t of targets) {
+          const agent = agentByPath.get(t) as string;
+          if (!MIGRATE_AGENTS.has(agent)) { sendJson(res, 400, { ok: false, error: `unsupported agent for target: ${t}` }); return; }
+          const list = groups.get(agent);
+          if (list) list.push(t); else groups.set(agent, [t]);
+        }
+        const root = backupRoot();
+        const merged = new Map<string, OpResult>();
+        const batchIds: string[] = [];
+        for (const [agent, groupTargets] of groups) {
+          const r = migrateSessions(groupTargets, {
+            type: body.type,
+            value: body.value,
+            ...(typeof body.userId === "string" ? { userId: body.userId } : {}),
+            allowedRoots: allInputs(),
+            claudeRoot: CLAUDE_ROOT,
+            backupRoot: root,
+            agent: agent as "claude" | "codex" | "openclaw",
+          });
+          batchIds.push(r.batchId);
+          for (const item of r.results) merged.set(item.path, item);
+        }
+        const response: MigrateResult & { batchIds: string[] } = {
+          batchId: batchIds[0],
+          batchIds,
+          results: targets.map((t) => projectOpResult(merged.get(t) as OpResult) as OpResult),
+        };
+        sendJson(res, 200, response);
+      } else if (u.pathname === "/api/migrations" && req.method === "GET") {
+        // 默认隐藏 rollback 安全备份批次（listBatches 契约）；
+        // withOps=1 才透传单批操作明细，默认响应保持 summary 形状（控制器裁定）。
+        const includeRollbacks = u.searchParams.get("rollbacks") === "1";
+        const withOps = u.searchParams.get("withOps") === "1";
+        sendJson(res, 200, listBatches(backupRoot(), includeRollbacks, withOps));
+      } else if (u.pathname === "/api/migrations/rollback" && req.method === "POST") {
+        if (!jsonContentType(req)) { sendJson(res, 415, { ok: false, error: "expected application/json" }); return; }
+        const body = await readJson(req);
+        if (typeof body.id !== "string" || !body.id) {
+          sendJson(res, 400, { ok: false, error: "id must be a non-empty string" }); return;
+        }
+        const root = backupRoot();
+        try {
+          readBatch(body.id, root); // 未知 / 非法 id 一律 400，不触盘。
+        } catch (e) {
+          sendJson(res, 400, { ok: false, error: (e as Error).message }); return;
+        }
+        const rollback = rollbackBatch(body.id, root);
+        sendJson(res, 200, { batchId: rollback.batchId, results: rollback.results.map(projectOpResult) });
       } else { res.writeHead(404); res.end("not found"); }
     } catch (e) { if (!res.headersSent) { res.writeHead(500); } res.end("internal error"); }
   });

@@ -12,6 +12,8 @@ const ICONS = `<svg width="0" height="0" style="position:absolute" aria-hidden="
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
   <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></symbol>
   <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></symbol>
+  <symbol id="i-migrate" viewBox="0 0 24 24"><path d="M4 8h13M17 8l-3-3M17 8l-3 3"/><path d="M20 16H7M7 16l3-3M7 16l3 3"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/><path d="M12 8v4l3 2"/></symbol>
 </svg>`;
 
 const FAVICON = `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#4f46e5"/><g fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><path d="M5 7h8M5 12h14M5 17h6"/><circle cx="17" cy="7" r="1.8"/><circle cx="14.5" cy="17" r="1.8"/></g></svg>')}">`;
@@ -34,11 +36,16 @@ ${ICONS}
   <span id="stat" class="muted small"></span>
   <button id="refresh" class="iconbtn" title="Refresh"><svg class="ic"><use href="#i-refresh"/></svg></button>
   <button id="inputsBtn" class="iconbtn" title="Input sources"><svg class="ic"><use href="#i-folder"/></svg></button>
+  <button id="migBtn" class="iconbtn" title="Migration history"><svg class="ic"><use href="#i-history"/></svg></button>
   <button id="theme" class="iconbtn" title="Toggle theme"><svg class="ic"><use href="#i-moon"/></svg></button>
 </header>
 <div class="filters">
   <div id="agents" class="pills" role="tablist"></div>
   <select id="dir" title="Filter by input source"><option value="">All sources</option></select>
+  <select id="proj" title="Filter by project (cwd)"><option value="">All projects</option></select>
+  <select id="acct" title="Filter by account"><option value="">All accounts</option></select>
+  <select id="model" title="Filter by model"><option value="">All models</option></select>
+  <button id="noteBtn" class="btn ghost xs" hidden>备注</button>
   <label class="toggle"><input type="checkbox" id="auto"> Auto-refresh</label>
   <select id="iv" title="Refresh interval"><option value="3000">3s</option><option value="5000" selected>5s</option><option value="10000">10s</option></select>
 </div>
@@ -51,12 +58,63 @@ ${ICONS}
   </div>
   <div id="inpList"></div>
 </div>
+<div id="migPanel" class="panel" hidden>
+  <div class="panel-title">Migration history <span class="muted small">— 每个批次可展开操作明细；回滚带漂移检测，文件被外部改动时整批中止。</span></div>
+  <div id="migList"><span class="muted small">Loading…</span></div>
+</div>
 <main class="split">
   <section id="list" class="list" aria-label="Sessions"><div id="rows"></div></section>
   <section id="detail" class="detail">
     <div class="empty"><div class="empty-ic">${LOGO}</div><div>Select a session to view its trace</div><div class="muted small">/ to search · j / k or ↑ / ↓ to move between sessions</div></div>
   </section>
 </main>
+<div id="batchBar" hidden>
+  <span id="batchCount" class="small"></span>
+  <span class="spacer"></span>
+  <button id="migProj" class="btn primary xs"><svg class="ic"><use href="#i-migrate"/></svg>迁移到工程…</button>
+  <button id="migAcct" class="btn xs"><svg class="ic"><use href="#i-migrate"/></svg>迁移到账号…</button>
+  <button id="clearPick" class="btn ghost xs">清空选择</button>
+</div>
+<div id="migrateModal" class="modal-mask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="migTitle">
+    <div id="migTitle" class="modal-title"></div>
+    <div class="modal-row">
+      <label for="migTarget">目标</label>
+      <select id="migTarget"></select>
+      <input id="migCustom" hidden autocomplete="off">
+      <input id="migUserId" hidden autocomplete="off" placeholder="creator_user_id（账号迁移必填）">
+    </div>
+    <div class="tablewrap">
+      <table class="preview">
+        <thead><tr><th>Session</th><th>Agent</th><th>字段</th><th>当前值</th><th>迁移后</th></tr></thead>
+        <tbody id="migPreview"></tbody>
+      </table>
+    </div>
+    <label class="toggle"><input type="checkbox" id="migConfirm"> 我已确认上述改动，先备份后执行</label>
+    <div class="modal-actions">
+      <span id="migMsg" class="err small"></span>
+      <span class="spacer"></span>
+      <button id="migCancel" class="btn ghost">取消</button>
+      <button id="migRun" class="btn primary" disabled>执行迁移</button>
+    </div>
+  </div>
+</div>
+<div id="noteModal" class="modal-mask" hidden>
+  <div class="modal sm" role="dialog" aria-modal="true" aria-labelledby="noteTitle">
+    <div id="noteTitle" class="modal-title">账号备注</div>
+    <div class="modal-row">
+      <label for="noteInput">备注名</label>
+      <input id="noteInput" autocomplete="off" placeholder="例如：团队共享号">
+    </div>
+    <div class="modal-actions">
+      <span id="noteMsg" class="err small"></span>
+      <span class="spacer"></span>
+      <button id="noteCancel" class="btn ghost">取消</button>
+      <button id="noteSave" class="btn primary">保存</button>
+    </div>
+  </div>
+</div>
+<div id="toast" hidden></div>
 <script src="/static/trace.js"></script>
 <script src="/static/list.js"></script>
 </body></html>`;
