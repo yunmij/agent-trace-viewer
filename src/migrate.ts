@@ -84,8 +84,24 @@ export function encodeClaudeProject(cwd: string): string {
   return cwd.split("/").join("-");
 }
 
-function sha256File(p: string): string {
-  return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+// 分块 sha256：readFileSync 整读会撞 V8 字符串上限（GB 级 rollout），
+// 用固定 Buffer 循环喂给 hash，内存占用恒定。chunkBytes 仅测试调小。
+const HASH_CHUNK = 1024 * 1024;
+function sha256File(p: string, chunkBytes: number = HASH_CHUNK): string {
+  const hash = crypto.createHash("sha256");
+  const fd = fs.openSync(p, "r");
+  try {
+    const buf = Buffer.allocUnsafe(chunkBytes);
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, chunkBytes, null);
+      if (n === 0) break;
+      hash.update(n === chunkBytes ? buf : buf.subarray(0, n));
+      if (n < chunkBytes) break;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
 }
 
 // failed 项也要尽量回填 postHash：按候选路径找第一个仍存在的普通文件算 sha256；
@@ -103,49 +119,75 @@ function tryPostHash(...candidates: string[]): string | undefined {
 // - mapRecord 返回 null 表示该行不改（原始字符串原样回写，不做重新序列化）；
 // - JSON.parse 失败的行保留原始字符串并计数，绝不丢行；
 // - 临时文件写在同目录（.migrate-<随机>），fsync 后 rename 覆盖；输出每行一个 JSON、末尾 \n。
+// - 分块读取（TextDecoder stream 模式处理跨块多字节字符）+ 逐行写临时文件，
+//   不把整文件读成字符串/数组，GB 级 rollout 也只占一个 chunk 的内存。
 // sink 可选：调用方用它收集结构化 Change（mapper 闭包内 push）。
+// chunkBytes 仅测试时调小以覆盖多块拼接。
 export function rewriteJsonlAtomic(
   file: string,
   mapRecord: (rec: Rec, idx: number) => Rec | null,
   sink: Change[] = [],
+  chunkBytes: number = 1024 * 1024,
 ): { changed: boolean; changes: Change[] } {
-  const text = fs.readFileSync(file, "utf8");
-  const lines = text.split("\n");
-  const hadTrailingNewline = lines.length > 0 && lines[lines.length - 1] === "";
-  if (hadTrailingNewline) lines.pop();
-
   let changed = false;
   let badLines = 0; // 损坏行计数：只统计与逐字保留，绝不丢行
   let recIdx = 0;
-  const out: string[] = [];
-  for (const raw of lines) {
-    if (raw.trim() === "") { out.push(raw); continue; }
+
+  const inFd = fs.openSync(file, "r");
+  const tmp = path.join(path.dirname(file), `.migrate-${crypto.randomBytes(8).toString("hex")}`);
+  let outFd = 0;
+  const decoder = new TextDecoder();
+  let carry = "";
+  const writeLine = (line: string): void => {
+    if (outFd === 0) outFd = fs.openSync(tmp, "w");
+    fs.writeSync(outFd, line + "\n");
+  };
+  const processLine = (raw: string): void => {
+    if (raw.trim() === "") { writeLine(raw); return; }
     let rec: Rec;
     try {
       rec = JSON.parse(raw);
     } catch {
       badLines += 1;
-      out.push(raw); // 损坏行逐字保留（含可能的 \r）
-      continue;
+      writeLine(raw); // 损坏行逐字保留（含可能的 \r）
+      return;
     }
     const mapped = mapRecord(rec, recIdx++);
-    if (mapped === null) { out.push(raw); continue; }
+    if (mapped === null) { writeLine(raw); return; }
     changed = true;
-    out.push(JSON.stringify(mapped));
-  }
-  if (!changed) return { changed: false, changes: sink };
+    writeLine(JSON.stringify(mapped));
+  };
 
-  const tmp = path.join(path.dirname(file), `.migrate-${crypto.randomBytes(8).toString("hex")}`);
   try {
-    const fd = fs.openSync(tmp, "w");
-    try {
-      fs.writeSync(fd, out.join("\n") + "\n");
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
+    const buf = Buffer.allocUnsafe(chunkBytes);
+    for (;;) {
+      const n = fs.readSync(inFd, buf, 0, chunkBytes, null);
+      if (n === 0) break;
+      carry += decoder.decode(n === chunkBytes ? buf : buf.subarray(0, n), { stream: true });
+      let nl: number;
+      while ((nl = carry.indexOf("\n")) >= 0) {
+        processLine(carry.slice(0, nl));
+        carry = carry.slice(nl + 1);
+      }
+      if (n < chunkBytes) break;
     }
+    if (carry.length) processLine(carry); // 无结尾换行的最后一行
+  } finally {
+    try { fs.closeSync(inFd); } catch {}
+  }
+
+  if (!changed) {
+    if (outFd) try { fs.closeSync(outFd); } catch {}
+    try { fs.unlinkSync(tmp); } catch {}
+    return { changed: false, changes: sink };
+  }
+
+  try {
+    fs.fsyncSync(outFd);
+    fs.closeSync(outFd);
     fs.renameSync(tmp, file);
   } catch (e) {
+    try { if (outFd) fs.closeSync(outFd); } catch {}
     try { fs.unlinkSync(tmp); } catch {}
     throw e;
   }

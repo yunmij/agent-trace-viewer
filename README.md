@@ -117,6 +117,7 @@ Agent transcripts often contain source code, file paths and occasionally secrets
 
 - **OpenClaw sibling snapshots.** Migration only rewrites the plain session log. OpenClaw `*.trajectory.jsonl` snapshot files next to it are never modified, so they may still record the old cwd after a project migration.
 - **Symlinked session files.** If a session file is reached through a symlink, every operation (including Claude project migration, which moves the file) acts on the realpath target; moving that target leaves the original symlink dangling.
+- **Very large session files.** Listing, metadata (title / cwd / account), line counts and migration use chunked reads and handle multi-GB JSONL files. The full trace view still needs to parse the whole file and is capped at 400 MB — larger sessions show an explicit error instead, while everything else keeps working.
 
 ## HTTP API
 

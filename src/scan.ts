@@ -107,15 +107,56 @@ export function detectFormat(text: string): "claude" | "codex" | "openclaw" {
   return "claude";
 }
 
+// 元数据只需要文件开头：读前缀（默认 512KB），避免整文件读入触发 V8 单字符串 ~512MB 上限
+// （真实 codex rollout 可达数 GB，整读会抛 RangeError 导致 cwd/账户/标题全空）。
+// 前缀末尾可能切在半行上，parseEarly 的 try/catch 会自然跳过这条不完整记录。
+const HEAD_BYTES = 512 * 1024;
+const COUNT_CHUNK = 1024 * 1024;
+
+function readHead(p: string, maxBytes: number = HEAD_BYTES): string {
+  let fd: number;
+  try { fd = fs.openSync(p, "r"); } catch { return ""; }
+  try {
+    const buf = Buffer.allocUnsafe(maxBytes);
+    const n = fs.readSync(fd, buf, 0, maxBytes, 0);
+    return buf.subarray(0, n).toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
+}
+
+// 基于 Buffer 的分块换行计数：不构造大字符串，GB 级文件也只占一个 chunk 的内存。
+// chunkBytes 仅测试时调小以覆盖多块拼接路径。
+export function countNewlines(p: string, chunkBytes: number = COUNT_CHUNK): number {
+  let fd: number;
+  try { fd = fs.openSync(p, "r"); } catch { return 0; }
+  let lines = 0;
+  try {
+    const buf = Buffer.allocUnsafe(chunkBytes);
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, chunkBytes, null);
+      if (n === 0) break;
+      for (let i = 0; i < n; i++) if (buf[i] === 0x0a) lines++;
+      if (n < chunkBytes) break;
+    }
+  } catch {
+    return lines;
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
+  return lines;
+}
+
 function fileMeta(p: string, mtimeMs: number): FileMeta {
   const c = fileMetaCache.get(p);
   if (c && c.mtimeMs === mtimeMs) return c;
-  let lines = 0, text = "";
-  try { text = fs.readFileSync(p, "utf8"); for (let i = 0; i < text.length; i++) if (text[i] === "\n") lines++; } catch {}
+  const text = readHead(p);
   const sm = structMeta(text);
   const meta: FileMeta = {
     mtimeMs,
-    lines,
+    lines: countNewlines(p),
     cwd: sm.cwd,
     title: sm.title,
     format: detectFormat(text),

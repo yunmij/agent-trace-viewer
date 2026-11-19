@@ -136,3 +136,22 @@ test("路径越界 / 非 jsonl 仍返回 error，不贴任何账户字段", () =
   const r2 = renderTranscript(path.join(tempHome, "note.txt"));
   assert.ok("error" in r2);
 });
+
+test("超过 400MB 的会话返回明确的体积错误而非 V8 RangeError", () => {
+  const root = path.join(tempHome, "huge-root");
+  fs.mkdirSync(root, { recursive: true });
+  const big = path.join(root, "huge.jsonl");
+  // 稀疏文件：瞬间造出 >400MB 且不实际占盘
+  const fd = fs.openSync(big, "w");
+  fs.writeSync(fd, "x", 400 * 1024 * 1024 + 1);
+  fs.closeSync(fd);
+
+  addInput(root);
+  try {
+    const r = renderTranscript(big);
+    assert.ok("error" in r);
+    assert.match((r as { error: string }).error, /too large to render/);
+  } finally {
+    removeInput(root);
+  }
+});

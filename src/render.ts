@@ -49,6 +49,13 @@ export function renderTranscript(p: string): RenderResult | RenderError {
   let st: fs.Stats;
   try { st = fs.statSync(real); } catch (e) { return { error: String(e) }; }
 
+  // trace 视图需要整文件解析后渲染进 DOM，GB 级 jsonl 既会撞 V8 单字符串上限也无法在页面内使用。
+  // 列表元数据与迁移已走分块路径不受此限；这里给明确错误而非裸 RangeError。
+  const MAX_RENDER_BYTES = 400 * 1024 * 1024;
+  if (st.size > MAX_RENDER_BYTES) {
+    return { error: `session file is too large to render in full (${(st.size / 1e9).toFixed(2)} GB); metadata and migration remain available, but the trace view is capped at 400 MB` };
+  }
+
   const cached = renderCache.get(real);
   if (cached && cached.mtimeMs === st.mtimeMs) {
     // 命中即视为最近使用：重排到末尾，淘汰真正最久未用的项。

@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { addInput, removeInput } from "../src/config.ts";
-import { scanSessions, structMetaFromRecords } from "../src/scan.ts";
+import { scanSessions, structMetaFromRecords, countNewlines } from "../src/scan.ts";
 import { saveAccountNote } from "../src/identity.ts";
 
 function makeTempHome(): string {
@@ -181,6 +181,35 @@ test("codex 文件缺 session_meta 时账户字段留空且不抛异常", () => 
     assert.equal(row.agent, "codex");
     assert.equal(row.accountId, undefined);
     assert.equal(row.accountLabel, undefined);
+  } finally {
+    removeInput(root);
+  }
+});
+
+// ---- 大文件支持：分块换行计数在小 chunk 下与真实行数一致（含多字节与无尾换行）----
+
+test("countNewlines 小 chunk 多块拼接计数正确，且 scanSessions 能解析大文件的开头元数据", () => {
+  const home = makeTempHome();
+  const root = path.join(home, "big-root");
+  fs.mkdirSync(root, { recursive: true });
+  const file = path.join(root, "big.jsonl");
+  // 首条带 cwd/account 的 session_meta，后续造足够多行使文件跨越多个小 chunk
+  const recs = [
+    JSON.stringify({ type: "session_meta", payload: { cwd: "/big/proj", creator_account_id: "acct-big", creator_user_id: "user-big" } }),
+  ];
+  for (let i = 0; i < 500; i++) recs.push(JSON.stringify({ type: "event_msg", i, pad: "中文 padding".repeat(8) }));
+  fs.writeFileSync(file, recs.join("\n") + "\n");
+
+  assert.equal(countNewlines(file, 64), recs.length, "64 字节小 chunk 也数对行数");
+  assert.equal(countNewlines(file, 4096), recs.length, "常规 chunk 结果一致");
+
+  addInput(root);
+  try {
+    const row = scanSessions(home).find((r) => r.path === file);
+    assert.ok(row);
+    assert.equal(row!.lines, recs.length);
+    assert.equal(row!.cwd, "/big/proj", "只读前缀即可取到归属元数据，不依赖整文件读入");
+    assert.equal(row!.accountId, "acct-big");
   } finally {
     removeInput(root);
   }

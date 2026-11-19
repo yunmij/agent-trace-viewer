@@ -69,6 +69,46 @@ test("codex JWT 缺 email claim 时 label 回退为 accountId 且不挂 email �
   assert.equal(info.email, undefined);
 });
 
+test("新版 codex token 的 account id 嵌在命名空间 claim 下也能解析", () => {
+  const home = makeTempHome();
+  const token = makeJwt({
+    email: "new@example.com",
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct-nested", chatgpt_user_id: "user-1" },
+  });
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".codex", "auth.json"), JSON.stringify({ tokens: { id_token: token } }));
+
+  const info = getCodexAuthIdentity(home);
+  assert.ok(info);
+  assert.equal(info.id, "acct-nested");
+  assert.equal(info.label, "new@example.com");
+  assert.equal(info.email, "new@example.com");
+});
+
+test("JWT 内无 account id 时回退到 auth.json 的 tokens.account_id", () => {
+  const home = makeTempHome();
+  const token = makeJwt({ email: "fallback@example.com" });
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".codex", "auth.json"),
+    JSON.stringify({ tokens: { id_token: token, account_id: "acct-from-tokens" } }),
+  );
+
+  const info = getCodexAuthIdentity(home);
+  assert.ok(info);
+  assert.equal(info.id, "acct-from-tokens");
+  assert.equal(info.label, "fallback@example.com");
+});
+
+test("三处都缺 account id 时返回 null", () => {
+  const home = makeTempHome();
+  const token = makeJwt({ email: "noid@example.com" });
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".codex", "auth.json"), JSON.stringify({ tokens: { id_token: token } }));
+
+  assert.equal(getCodexAuthIdentity(home), null);
+});
+
 test("凭据文件全缺时两个 getter 返回 null 且不抛异常", () => {
   const home = makeTempHome();
   assert.equal(getClaudeIdentity(home), null);

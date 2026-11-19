@@ -42,14 +42,35 @@ export function getClaudeIdentity(homeDir: string = os.homedir()): AccountInfo |
 }
 
 // Codex 身份：~/.codex/auth.json 的 tokens.id_token 解 payload，取 email 与 chatgpt_account_id。
+// 真实 token 的 account id 有三种位置（按可信度/常见度回退）：
+//   1. 命名空间 claim `https://api.openai.com/auth`.chatgpt_account_id（轮换后的新 token）
+//   2. 顶层 chatgpt_account_id（旧版 token）
+//   3. auth.json 的 tokens.account_id（CLI 自己持久化的账号 id，不依赖 JWT 形态）
+const CODEX_AUTH_NS = "https://api.openai.com/auth";
+
+function codexAccountId(payload: Record<string, unknown>, tokensAccountId: unknown): string | null {
+  const nested = payload[CODEX_AUTH_NS];
+  if (nested && typeof nested === "object") {
+    const v = (nested as Record<string, unknown>).chatgpt_account_id;
+    if (typeof v === "string" && v) return v;
+  }
+  const top = payload.chatgpt_account_id;
+  if (typeof top === "string" && top) return top;
+  if (typeof tokensAccountId === "string" && tokensAccountId) return tokensAccountId;
+  return null;
+}
+
 export function getCodexAuthIdentity(homeDir: string = os.homedir()): AccountInfo | null {
-  const auth = readJson(path.join(homeDir, ".codex", "auth.json")) as { tokens?: { id_token?: unknown } } | null;
+  const auth = readJson(path.join(homeDir, ".codex", "auth.json")) as
+    | { tokens?: { id_token?: unknown; account_id?: unknown } }
+    | null;
   const token = auth?.tokens?.id_token;
   if (typeof token !== "string") return null;
   try {
     const payload = decodeJwtPayload(token);
-    const { email, chatgpt_account_id: accountId } = payload;
-    if (typeof accountId !== "string") return null;
+    const accountId = codexAccountId(payload, auth?.tokens?.account_id);
+    if (!accountId) return null;
+    const { email } = payload;
     const info: AccountInfo = { kind: "codex", id: accountId, label: typeof email === "string" ? email : accountId };
     if (typeof email === "string") info.email = email;
     return info;

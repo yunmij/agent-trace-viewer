@@ -637,3 +637,54 @@ test("Minor③：对 rollback 安全备份批次再回滚，文件恢复为迁�
   assert.equal(nestedManifest.type, "rollback");
   assert.equal(nestedManifest.rollbackOf, rb1.batchId);
 });
+
+// ---- 大文件分块路径：小 chunk 强制多块拼接，验证与整读实现语义等价 ----
+
+test("rewriteJsonlAtomic 极小 chunk 下多块拼接：多字节字符/空行/损坏行/无尾换行均保真", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "chunked.jsonl");
+  // 含中文多字节字符（跨 chunk 切割）、空行、损坏行，且文件无结尾换行
+  const lines = [
+    JSON.stringify({ type: "user", cwd: "/旧/工程", text: "你好世界，这是一条足够长的中文内容用于跨块切割".repeat(4) }),
+    "",
+    "{bad json 损坏行",
+    JSON.stringify({ type: "assistant", cwd: "/旧/工程", text: "second" }),
+  ];
+  fs.writeFileSync(src, lines.join("\n")); // 故意不加结尾 \n
+
+  const r = rewriteJsonlAtomic(src, (rec) => (typeof rec.cwd === "string" ? { ...rec, cwd: "/新/工程" } : null), [], 16);
+  assert.equal(r.changed, true);
+
+  const raw = fs.readFileSync(src, "utf8");
+  const out = raw.split("\n");
+  assert.equal(out[out.length - 1], "", "输出以换行结尾");
+  out.pop();
+  assert.equal(out.length, lines.length, "行数不丢不增");
+  assert.equal(JSON.parse(out[0]).cwd, "/新/工程");
+  assert.equal(JSON.parse(out[0]).text, JSON.parse(lines[0]).text, "多字节字符无损");
+  assert.equal(out[1], "", "空行保留");
+  assert.equal(out[2], "{bad json 损坏行", "损坏行逐字保留");
+  assert.equal(JSON.parse(out[3]).cwd, "/新/工程");
+});
+
+test("rewriteJsonlAtomic 无变更时不创建临时文件且原文件字节不变", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "nochange.jsonl");
+  writeJsonl(src, [{ type: "user", cwd: "/keep" }]);
+  const before = fs.readFileSync(src);
+  const r = rewriteJsonlAtomic(src, () => null, [], 8);
+  assert.equal(r.changed, false);
+  assert.deepEqual(fs.readFileSync(src), before);
+  assert.equal(fs.readdirSync(sb.allowedRoot).filter((f) => f.startsWith(".migrate-")).length, 0);
+});
+
+test("分块 sha256（manifest 的 postHash）与一次性哈希一致", () => {
+  const sb = sandbox();
+  const src = path.join(sb.allowedRoot, "hash.jsonl");
+  writeJsonl(src, Array.from({ length: 200 }, (_, i) => ({ i, cwd: `/p/${i}`, pad: "x".repeat(100) })));
+  const opts = baseOpts({ agent: "codex", value: "/new/p", allowedRoots: [sb.allowedRoot], claudeRoot: sb.claudeRoot, backupRoot: sb.backupRoot });
+  const res = migrateSessions([src], opts);
+  const batch = readBatch(res.batchId, sb.backupRoot);
+  const expected = crypto.createHash("sha256").update(fs.readFileSync(src)).digest("hex");
+  assert.equal(batch.ops[0].postHash, expected, "小 chunk 分块哈希与整文件哈希等价");
+});
