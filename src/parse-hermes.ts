@@ -234,7 +234,7 @@ export function listHermesSessions(): SessionRow[] {
   if (!db) return [];
   try {
     const rows = db.prepare(
-      `SELECT s.id, s.cwd, s.message_count, s.started_at, s.ended_at, s.title,
+      `SELECT s.id, s.cwd, s.message_count, s.started_at, s.ended_at, s.title, s.model,
               (SELECT m.content FROM messages m
                  WHERE m.session_id = s.id AND m.role = 'user'
                  ORDER BY m.id LIMIT 1) AS first_user
@@ -253,6 +253,7 @@ export function listHermesSessions(): SessionRow[] {
         sessionId: id,
         title: (str(s.title) || str(s.first_user)).replace(/\s+/g, " ").trim().slice(0, 120),
         cwd: str(s.cwd),
+        model: str(s.model) || undefined,
         path: hermesRef(id),
       };
     });

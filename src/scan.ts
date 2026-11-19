@@ -17,6 +17,7 @@ interface FileMeta {
   format: "claude" | "codex" | "openclaw";
   accountId?: string;
   accountUserId?: string;
+  model?: string;
 }
 const fileMetaCache = new Map<string, FileMeta>();
 
@@ -43,6 +44,16 @@ function parseEarly(text: string, n: number): Rec[] {
   return recs;
 }
 
+// 行数组变体：readHeadLines 已按记录数截断，这里只负责跳过空行/坏行（含被截断的巨行前缀）。
+function parseEarlyLines(lines: string[]): Rec[] {
+  const recs: Rec[] = [];
+  for (const s of lines) {
+    if (!s.trim()) continue;
+    try { recs.push(JSON.parse(s)); } catch {}
+  }
+  return recs;
+}
+
 // 首条「真实」用户输入：跳过 <command-name> / <environment_context> / <system-reminder> 等注入包装。
 function titleOf(t: string): string {
   const s = t.replace(/\s+/g, " ").trim();
@@ -50,12 +61,19 @@ function titleOf(t: string): string {
   return s.slice(0, 120);
 }
 
+// <synthetic> 是 Claude 对压缩/合成 assistant 记录的占位，不是真实可选模型，列表主模型跳过它。
+function realModel(m: unknown): string {
+  return typeof m === "string" && m && m !== "<synthetic>" ? m : "";
+}
+
 // 从已解析的开头若干条记录取 cwd + 标题。解析器手里已有全量 records，
 // 直接传 records.slice(0, META_RECORDS) 即可，避免再 split + JSON.parse 一遍（大 jsonl 的关键省时点）。
 //   cwd  : claude 记录上的 cwd / codex session_meta.payload.cwd / openclaw session.cwd · workspaceDir
 //   title: 首条真实 user 文本
+//   model: 首个真实 assistant 模型（claude message.model / codex turn_context.payload.model /
+//          openclaw model_change.modelId 或 message.model），合成占位值跳过
 export function structMetaFromRecords(recs: Rec[]): StructMeta {
-  let cwd = "", title = "";
+  let cwd = "", title = "", model = "";
   let accountId: string | undefined, accountUserId: string | undefined;
   let metaSeen = false; // 只有首条 session_meta 对归属有权威性，后续内嵌 meta 忽略。
   for (const r of recs) {
@@ -79,9 +97,15 @@ export function structMetaFromRecords(recs: Rec[]): StructMeta {
       else if (r.type === "event_msg" && r.payload && r.payload.type === "user_message") ut = String(r.payload.message || "");
       if (ut) title = titleOf(ut);
     }
-    if (cwd && title) break;
+    if (!model) {
+      if (r.type === "assistant") model = realModel(r.message?.model);
+      else if (r.type === "turn_context") model = realModel(r.payload?.model);
+      else if (r.type === "model_change") model = realModel(r.modelId);
+      else if (r.type === "message" && r.message?.role === "assistant") model = realModel(r.message.model);
+    }
+    if (cwd && title && model) break;
   }
-  return { cwd, title, accountId, accountUserId };
+  return { cwd, title, accountId, accountUserId, model: model || undefined };
 }
 
 // 仅有原始文本时（如扫盘列表）用此变体。
@@ -107,24 +131,51 @@ export function detectFormat(text: string): "claude" | "codex" | "openclaw" {
   return "claude";
 }
 
-// 元数据只需要文件开头：读前缀（默认 512KB），避免整文件读入触发 V8 单字符串 ~512MB 上限
-// （真实 codex rollout 可达数 GB，整读会抛 RangeError 导致 cwd/账户/标题全空）。
-// 前缀末尾可能切在半行上，parseEarly 的 try/catch 会自然跳过这条不完整记录。
+// 元数据只需要文件开头的有界片段。真实 codex rollout 存在「巨首行」：单条内嵌
+// session_meta 可达数 MB，纯字节前缀（512KB）会把同文件第 4 行的 turn_context（模型字段所在）
+// 切掉。因此这里按「记录数封顶 META_RECORDS + 单行字节封顶」流式读取——
+// 超大单行只取前缀用于格式探测，完整解析留给后续行；总内存有界，GB 级文件也安全。
 const HEAD_BYTES = 512 * 1024;
 const COUNT_CHUNK = 1024 * 1024;
+const MAX_LINE_BYTES = 16 * 1024 * 1024;
+const READ_CHUNK = 256 * 1024;
 
-function readHead(p: string, maxBytes: number = HEAD_BYTES): string {
+// 流式读取文件开头至多 maxRecords 条记录，返回原始行字符串数组。
+// 单行超过 MAX_LINE_BYTES 时只保留 HEAD_BYTES 前缀：是故意的非法 JSON，
+// parseEarly 会跳过它，但其文本前缀仍可供 detectFormat 判型；后续正常行不受影响。
+function readHeadLines(p: string, maxRecords: number = META_RECORDS): string[] {
   let fd: number;
-  try { fd = fs.openSync(p, "r"); } catch { return ""; }
+  try { fd = fs.openSync(p, "r"); } catch { return []; }
+  const lines: string[] = [];
+  const decoder = new TextDecoder();
+  let carry = "";
   try {
-    const buf = Buffer.allocUnsafe(maxBytes);
-    const n = fs.readSync(fd, buf, 0, maxBytes, 0);
-    return buf.subarray(0, n).toString("utf8");
+    const buf = Buffer.allocUnsafe(READ_CHUNK);
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, READ_CHUNK, null);
+      if (n === 0) break;
+      carry += decoder.decode(n === READ_CHUNK ? buf : buf.subarray(0, n), { stream: true });
+      let nl: number;
+      while ((nl = carry.indexOf("\n")) >= 0) {
+        const raw = carry.slice(0, nl);
+        lines.push(Buffer.byteLength(raw, "utf8") > MAX_LINE_BYTES ? raw.slice(0, HEAD_BYTES) : raw);
+        if (lines.length >= maxRecords) return lines;
+        carry = carry.slice(nl + 1);
+      }
+      if (n < READ_CHUNK) break;
+    }
+    if (carry.trim()) lines.push(carry);
   } catch {
-    return "";
+    // 读异常时返回已收集部分，元数据尽力而为。
   } finally {
     try { fs.closeSync(fd); } catch {}
   }
+  return lines;
+}
+
+// 兼容入口：返回开头文本供 detectFormat 使用（巨行前缀已包含在内）。
+function readHead(p: string): string {
+  return readHeadLines(p).join("\n");
 }
 
 // 基于 Buffer 的分块换行计数：不构造大字符串，GB 级文件也只占一个 chunk 的内存。
@@ -152,8 +203,9 @@ export function countNewlines(p: string, chunkBytes: number = COUNT_CHUNK): numb
 function fileMeta(p: string, mtimeMs: number): FileMeta {
   const c = fileMetaCache.get(p);
   if (c && c.mtimeMs === mtimeMs) return c;
-  const text = readHead(p);
-  const sm = structMeta(text);
+  const headLines = readHeadLines(p);
+  const text = headLines.join("\n");
+  const sm = structMetaFromRecords(parseEarlyLines(headLines));
   const meta: FileMeta = {
     mtimeMs,
     lines: countNewlines(p),
@@ -162,6 +214,7 @@ function fileMeta(p: string, mtimeMs: number): FileMeta {
     format: detectFormat(text),
     accountId: sm.accountId,
     accountUserId: sm.accountUserId,
+    model: sm.model,
   };
   fileMetaCache.set(p, meta);
   return meta;
@@ -226,6 +279,7 @@ export function scanSessions(homeDir: string = os.homedir()): SessionRow[] {
       title: meta.title,
       cwd: meta.cwd,
       path: f,
+      model: meta.model,
     };
     if (isCodex) {
       // 缺 session_meta 的异常文件不挂账户字段。

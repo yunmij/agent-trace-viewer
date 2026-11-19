@@ -44,6 +44,7 @@ ${ICONS}
   <select id="dir" title="Filter by input source"><option value="">All sources</option></select>
   <select id="proj" title="Filter by project (cwd)"><option value="">All projects</option></select>
   <select id="acct" title="Filter by account"><option value="">All accounts</option></select>
+  <select id="model" title="Filter by model"><option value="">All models</option></select>
   <button id="noteBtn" class="btn ghost xs" hidden>备注</button>
   <label class="toggle"><input type="checkbox" id="auto"> Auto-refresh</label>
   <select id="iv" title="Refresh interval"><option value="3000">3s</option><option value="5000" selected>5s</option><option value="10000">10s</option></select>

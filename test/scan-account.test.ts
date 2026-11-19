@@ -8,6 +8,7 @@ import path from "node:path";
 import { addInput, removeInput } from "../src/config.ts";
 import { scanSessions, structMetaFromRecords, countNewlines } from "../src/scan.ts";
 import { saveAccountNote } from "../src/identity.ts";
+import { attachModel } from "../src/render.ts";
 
 function makeTempHome(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "atv-scan-"));
@@ -210,6 +211,82 @@ test("countNewlines 小 chunk 多块拼接计数正确，且 scanSessions 能解
     assert.equal(row!.lines, recs.length);
     assert.equal(row!.cwd, "/big/proj", "只读前缀即可取到归属元数据，不依赖整文件读入");
     assert.equal(row!.accountId, "acct-big");
+  } finally {
+    removeInput(root);
+  }
+});
+
+// ---- 会话主模型提取 ----
+
+test("structMetaFromRecords 提取各 agent 首个真实模型，<synthetic> 占位跳过取下一个", () => {
+  // claude：assistant 记录的 message.model；首个是合成占位时跳过。
+  const claudeRecs = [
+    { type: "user", message: { role: "user", content: "hi" } },
+    { type: "assistant", message: { role: "assistant", model: "<synthetic>", content: [] } },
+    { type: "assistant", message: { role: "assistant", model: "claude-opus-5-5", content: [] } },
+  ];
+  assert.equal(structMetaFromRecords(claudeRecs).model, "claude-opus-5-5");
+
+  // codex：turn_context.payload.model
+  const codexRecs = [
+    { type: "session_meta", payload: { cwd: "/p" } },
+    { type: "turn_context", payload: { model: "gpt-6.1-sol" } },
+  ];
+  assert.equal(structMetaFromRecords(codexRecs).model, "gpt-6.1-sol");
+
+  // openclaw：model_change.modelId 与 assistant message.model
+  assert.equal(
+    structMetaFromRecords([{ type: "model_change", modelId: "ep-20260130-qgg9r" }]).model,
+    "ep-20260130-qgg9r",
+  );
+  assert.equal(
+    structMetaFromRecords([{ type: "message", message: { role: "assistant", model: "oc-model-1" } }]).model,
+    "oc-model-1",
+  );
+
+  // 没有任何模型记录时留 undefined（而非空串）。
+  assert.equal(structMetaFromRecords([{ type: "user", message: { role: "user", content: "x" } }]).model, undefined);
+});
+
+test("attachModel 从 events 取首个带 model 的事件，已带 model 时不覆盖", () => {
+  const base = {
+    path: "/x.jsonl", cwd: "/p", sessionId: "s", title: "t", count: 2,
+    events: [
+      { seq: 0, role: "user" as const, ts: "" },
+      { seq: 1, role: "assistant" as const, ts: "", model: "m-first" },
+      { seq: 2, role: "assistant" as const, ts: "", model: "m-second" },
+    ],
+  };
+  assert.equal(attachModel(base).model, "m-first");
+  assert.equal(attachModel({ ...base, model: "preset" }).model, "preset");
+  assert.equal(attachModel({ ...base, events: [{ seq: 0, role: "user" as const, ts: "" }] }).model, undefined);
+});
+
+test("巨首行（单条记录超过字节前缀）不挡后续 turn_context 的模型与 cwd 提取", () => {
+  const home = makeTempHome();
+  const root = path.join(home, "huge-firstline");
+  fs.mkdirSync(root, { recursive: true });
+  const file = path.join(root, "rollout-huge.jsonl");
+  // 第一条 session_meta 塞入超大 payload（远超 512KB 字节前缀），第 4 行才是 turn_context。
+  const giant = JSON.stringify({
+    type: "session_meta",
+    payload: { cwd: "/huge/proj", creator_account_id: "acct-huge", padding: "x".repeat(900 * 1024) },
+  });
+  const lines = [
+    giant,
+    JSON.stringify({ type: "event_msg", payload: { type: "noise" } }),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [] } }),
+    JSON.stringify({ type: "turn_context", payload: { cwd: "/huge/proj", model: "gpt-mega-1" } }),
+  ];
+  fs.writeFileSync(file, lines.join("\n") + "\n");
+
+  addInput(root);
+  try {
+    const row = scanSessions(home).find((r) => r.path === file);
+    assert.ok(row);
+    assert.equal(row!.model, "gpt-mega-1", "巨首行之后的 turn_context 模型仍被提取");
+    assert.equal(row!.cwd, "/huge/proj");
+    assert.equal(row!.accountId, "acct-huge", "首条 meta 被截断跳过不影响其字段——若截断发生则此字段为空，此处锁定完整解析");
   } finally {
     removeInput(root);
   }

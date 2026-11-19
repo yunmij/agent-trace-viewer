@@ -35,12 +35,20 @@ export function attachAccount(base: RenderResult, kind: RenderKind): RenderResul
   return base;
 }
 
+// 会话主模型：events 里首个带 model 的事件。四个 parser 都已把模型解析到 TraceEvent.model，
+// 这里统一后处理即可，parser 与缓存结构不用改；hermes 走同一入口（见 renderTranscript 末尾）。
+export function attachModel(base: RenderResult): RenderResult {
+  if (base.model) return base;
+  const first = base.events.find((e) => typeof e.model === "string" && e.model);
+  return first?.model ? { ...base, model: first.model } : base;
+}
+
 // 只允许读取输入源根目录下、以 .jsonl 结尾的文件。
 export function renderTranscript(p: string): RenderResult | RenderError {
   // hermes 会话不是文件，而是 state.db 里的一行，ref 形如 `<db>::<sessionId>`。
   // 走 SQLite 解析，绕过下面的 .jsonl 路径校验（renderHermes 只读固定的 HERMES_DB）。
-  // hermes 无账户概念，不做账户贴附。
-  if (isHermesRef(p)) return renderHermes(p);
+  // hermes 无账户概念，不做账户贴附，但模型同样经 attachModel 统一补齐。
+  if (isHermesRef(p)) return attachModel(renderHermes(p));
 
   const real = path.resolve(p);
   const allowed = real.endsWith(".jsonl") && allInputs().some((r) => real === r || real.startsWith(r + path.sep));
@@ -60,7 +68,7 @@ export function renderTranscript(p: string): RenderResult | RenderError {
   if (cached && cached.mtimeMs === st.mtimeMs) {
     // 命中即视为最近使用：重排到末尾，淘汰真正最久未用的项。
     renderCache.delete(real); renderCache.set(real, cached);
-    return attachAccount(cached.result, cached.kind);
+    return attachModel(attachAccount(cached.result, cached.kind));
   }
 
   let text: string;
@@ -79,5 +87,5 @@ export function renderTranscript(p: string): RenderResult | RenderError {
     const oldest = renderCache.keys().next().value;
     if (oldest !== undefined) renderCache.delete(oldest);
   }
-  return attachAccount(base, kind);
+  return attachModel(attachAccount(base, kind));
 }

@@ -39,6 +39,8 @@ export interface RenderResult {
   title: string;
   count: number;
   events: TraceEvent[];
+  // 会话主模型：events 中首个带 model 的事件（render 层统一后处理，四个 parser 零改动）。
+  model?: string;
   // 账户归属：codex 取首条 session_meta 的 creator_account_id（parser 落 id，
   // label 由 render 层按三分支规则贴）；claude 取本机共享身份；openclaw/hermes 留空。
   accountId?: string;
@@ -63,6 +65,8 @@ export interface SessionRow {
   // openclaw / hermes 无账户概念，保持 undefined。
   accountId?: string;
   accountLabel?: string;
+  // 会话主模型：前缀记录里首个真实 assistant 模型（<synthetic> 等合成值跳过）；取不到则留空。
+  model?: string;
 }
 
 export interface StructMeta {
@@ -71,6 +75,8 @@ export interface StructMeta {
   // 仅 codex：首条 session_meta.payload 的 creator 字段；后续内嵌 meta 一律忽略。
   accountId?: string;
   accountUserId?: string;
+  // 前缀记录里首个真实模型名。
+  model?: string;
 }
 
 export interface AddResult {

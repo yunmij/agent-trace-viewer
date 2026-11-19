@@ -136,6 +136,41 @@ test("match 多词 AND 过滤，跨 title/cwd/path 字段匹配", () => {
   assert.equal(ctx.match(r, "DEPLOY ROLLOUT"), true);       // 大小写不敏感
 });
 
+test("模型徽章渲染（无模型不渲染）且 #model 下拉可筛选", async () => {
+  const { ctx, els } = buildSandbox();
+  await settle();
+  ctx.ALL = [
+    row({ path: "/a.jsonl", model: "gpt-6.1-sol" }),
+    row({ path: "/b.jsonl", model: 'm"<x>', agent: "claude" }),
+    row({ path: "/c.jsonl", model: undefined, agent: "openclaw" }),
+  ];
+  ctx.populateFilters();
+  ctx.render();
+
+  // 选项去重且按字母序，值为模型名本身
+  const opts: string = els["#model"].innerHTML;
+  assert.ok(opts.includes('value="gpt-6.1-sol"'), opts);
+  assert.ok(opts.includes("All models"), opts);
+
+  // 徽章出现、特殊字符转义；无模型行不渲染 .model
+  const html: string = els["#rows"].innerHTML;
+  assert.ok(html.includes('class="model"') && html.includes("gpt-6.1-sol"), html);
+  assert.ok(html.includes("m&quot;&lt;x&gt;"), "模型名经 esc 转义");
+  const cRow = html.split('data-path="/c.jsonl"').join("").split("</div>").pop() || "";
+  assert.equal((html.match(/class="model"/g) || []).length, 2, "仅两个有模型的行渲染徽章");
+
+  // 筛选：选中 gpt-6.1-sol 后只剩一行
+  els["#model"].value = "gpt-6.1-sol";
+  ctx.render();
+  assert.equal(ctx.VIEW.length, 1);
+  assert.equal(ctx.VIEW[0].path, "/a.jsonl");
+
+  // 清空筛选恢复全部
+  els["#model"].value = "";
+  ctx.render();
+  assert.equal(ctx.VIEW.length, 3);
+});
+
 test("load 后已消失的 path 自动退出 picked，pickedRows 只返回存活会话", async () => {
   const { ctx } = buildSandbox();
   await settle();

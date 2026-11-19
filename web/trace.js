@@ -84,22 +84,24 @@ function eventCards(e){
     return card("system", e.ts, chip(injBadge(inj)), prev(t), '<div class="ctext">'+esc(t)+'</div>', t.length<=300);
   }
   var out="";
+  // assistant 事件带 model 时在每个卡片标签区显示，中途切换模型可逐卡看出。
+  var modelTag=(e.role==="assistant"&&e.model)?chip(e.model):"";
   (e.blocks||[]).forEach(function(b){
     if(b.kind==="text"){
       var tg=e.role==="assistant"?"commentary":(e.role==="user"?"message":"context");
-      out+=card(e.role, e.ts, chip(tg), prev(b.text), '<div class="ctext md">'+mdLight(b.text||"")+'</div>', true);
+      out+=card(e.role, e.ts, modelTag+chip(tg), prev(b.text), '<div class="ctext md">'+mdLight(b.text||"")+'</div>', true);
     } else if(b.kind==="thinking"){
-      out+=card("assistant", e.ts, chip("thinking"), prev(b.text), '<div class="ctext think">'+esc(b.text||"")+'</div>', false);
+      out+=card("assistant", e.ts, modelTag+chip("thinking"), prev(b.text), '<div class="ctext think">'+esc(b.text||"")+'</div>', false);
     } else if(b.kind==="tool_use"){
       var inp=pj(b.input);
-      out+=card("assistant", e.ts, pillTag("tool","tool", b.name), prev(inp), '<pre class="cblk">'+esc(inp)+'</pre>', false);
+      out+=card("assistant", e.ts, modelTag+pillTag("tool","tool", b.name), prev(inp), '<pre class="cblk">'+esc(inp)+'</pre>', false);
     } else if(b.kind==="tool_result"){
       var tx=b.text||"";
       out+=card("tool", e.ts, pillTag(b.ok?"result":"error", b.ok?"result":"result err", b.toolName||"tool"), prev(tx), '<pre class="cblk">'+esc(tx)+'</pre>', false);
     } else if(b.kind==="image"){
       out+=card(e.role, e.ts, chip("image"), "🖼️ image", '<div class="muted">🖼️ image</div>', true);
     } else {
-      out+=card(e.role, e.ts, chip(b.kind), prev(b.text), '<div class="ctext">'+esc(b.text||"")+'</div>', false);
+      out+=card(e.role, e.ts, modelTag+chip(b.kind), prev(b.text), '<div class="ctext">'+esc(b.text||"")+'</div>', false);
     }
   });
   return out;
@@ -157,6 +159,7 @@ async function loadTrace(p, mountSel){
   var chips=Object.keys(stats).map(function(k){return '<span class="stat"><b>'+stats[k]+'</b> '+esc(k.replace("_"," "))+'</span>';}).join('');
   mount.innerHTML='<div class="tracehdr"><div class="tt">'+esc(d.title||d.sessionId)+'</div>'+
     '<div class="tmeta"><code>'+esc(d.sessionId)+'</code>'+
+    (d.model?'<span class="dot">·</span><span class="model" title="会话主模型（首个 assistant 模型）">'+esc(d.model)+'</span>':'')+
     (d.accountLabel?'<span class="dot">·</span><span class="acct" title="'+esc(d.accountId||d.accountLabel)+'">'+esc(d.accountLabel)+'</span>':'')+'</div>'+
     (d.cwd?'<div class="tmeta cwdrow" title="点击复制完整工作目录"><svg class="ic"><use href="#i-folder"/></svg><code class="copycwd">'+esc(d.cwd)+'</code></div>':'')+
     '<div class="tmeta path" title="'+esc(d.path)+'">'+esc(d.path)+'</div>'+

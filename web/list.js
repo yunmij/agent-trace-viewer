@@ -37,18 +37,20 @@ function match(r, q) {
 
 function render() {
   var q = $("#q").value, di = $("#dir").value, dir = di === "" ? "" : DIRS[Number(di)];
-  var proj = $("#proj").value, acct = $("#acct").value;
+  var proj = $("#proj").value, acct = $("#acct").value, mdl = $("#model").value;
   VIEW = ALL.filter(function (r) {
     return (!agentFilter || r.agent === agentFilter)
       && (!dir || r.path === dir || r.path.indexOf(dir + "/") === 0)
       && (!proj || r.cwd === proj)
       && (!acct || r.accountId === acct)
+      && (!mdl || r.model === mdl)
       && match(r, q);
   });
   $("#rows").innerHTML = VIEW.length ? VIEW.map(function (r, i) {
     var meta = [
       '<span class="agent a-' + esc(r.agent) + '">' + esc(r.agent) + '</span>',
       r.accountLabel ? '<span class="acct" title="' + esc(r.accountId || r.accountLabel) + '">' + esc(r.accountLabel) + '</span>' : '',
+      r.model ? '<span class="model" title="model">' + esc(r.model) + '</span>' : '',
       '<span title="' + esc(r.mtimeStr) + '">' + esc(relTime(r.mtime)) + '</span>',
       r.cwd ? '<span class="proj" title="' + esc(r.cwd) + '">' + esc(baseName(r.cwd)) + '</span>' : '',
       '<span>' + r.lines + (r.agent === "hermes" ? " msgs" : " lines") + '</span>',
@@ -96,6 +98,16 @@ function populateFilters() {
   }).join("");
   acctSel.value = ids.indexOf(curAcct) >= 0 ? curAcct : "";
   toggleNoteBtn();
+
+  // 模型筛选：model 字段去重，显示模型名本身（无模型的会话不进选项）。
+  var modelSel = $("#model"), curModel = modelSel.value;
+  var models = [];
+  ALL.forEach(function (r) { if (r.model && models.indexOf(r.model) < 0) models.push(r.model); });
+  models.sort();
+  modelSel.innerHTML = '<option value="">All models</option>' + models.map(function (m) {
+    return '<option value="' + esc(m) + '" title="' + esc(m) + '">' + esc(m) + '</option>';
+  }).join("");
+  modelSel.value = models.indexOf(curModel) >= 0 ? curModel : "";
 }
 
 async function populateDirs() {
@@ -152,6 +164,7 @@ $("#q").addEventListener("input", render);
 $("#dir").addEventListener("change", render);
 $("#proj").addEventListener("change", render);
 $("#acct").addEventListener("change", function () { render(); toggleNoteBtn(); });
+$("#model").addEventListener("change", render);
 $("#refresh").addEventListener("click", load);
 function setAuto() { if (timer) { clearInterval(timer); timer = null; } if ($("#auto").checked) timer = setInterval(load, Number($("#iv").value)); }
 $("#auto").addEventListener("change", setAuto); $("#iv").addEventListener("change", setAuto);
